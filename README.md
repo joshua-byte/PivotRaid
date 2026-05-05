@@ -1,41 +1,84 @@
-# PivotRaid
+# PivotRaid 🎯
 
-PivotRaid is a red-team-oriented tool that analyzes FTP and SMB services to identify file exposure, weak configurations, and potential lateral movement paths.
+[![Language](https://img.shields.io/badge/Language-Python%203-blue.svg)](https://www.python.org/)
+[![Focus](https://img.shields.io/badge/Focus-Infrastructure%20VAPT-red.svg)]()
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-It focuses on how attackers can move across services by leveraging shared data, weak credentials, and misconfigurations.
+PivotRaid is a lightweight, red-team-oriented automation tool designed to analyze exposed **FTP** and **SMB** services. It automates the tedious process of manual service enumeration to identify file exposure, weak configurations, and cross-service lateral movement pathways.
 
----
-
-## Features
-
-- FTP enumeration and misconfiguration detection  
-- SMB share analysis and access validation  
-- Detection of sensitive files (credentials, configs, backups)  
-- Cross-service attack path correlation  
-- Confidence-based risk scoring  
-- Structured HTML report generation  
+By correlating data from both protocols, PivotRaid identifies how an attacker can leverage weak configurations or shared file contents on one service to pivot and compromise another.
 
 ---
 
-## Installation
+## 🛠️ Key Features
 
-Clone the repository and install dependencies:
+* **FTP Security Auditing:** Automatically tests for anonymous login, enumerates directories, and grabs service banners to flag outdated, vulnerable versions.
+* **SMB Share Analysis:** Validates null session access, enumerates active shares, and tests read/write permissions across accessible directories.
+* **Sensitive File Exposure Detection:** Scans directories using optimized regex patterns to flag high-value targets (e.g., `.git`, `.env`, backups, SSH keys, configuration files, and database credentials).
+* **Cross-Service Correlation Engine:** Evaluates findings from both services to map realistic local and lateral attack paths (e.g., finding credentials on an open SMB share and testing them against FTP).
+* **Risk Scoring & Analytics:** Provides a confidence-based severity score for discovered attack paths to help defenders prioritize remediation.
+* **Professional Reporting:** Generates an executive-ready, interactive **HTML report** detailing findings, evidence, mapped attack paths, and remediation steps.
 
-```bash
-git clone https://github.com/joshua-byte/PivotRaid.git
-cd PivotRaid
-pip install -r requirements.txt
+---
+
+## 📐 Tool Architecture & Data Flow
+
+```
+                      [ Target IP ]
+                            │
+              ┌─────────────┴─────────────┐
+              ▼                           ▼
+        [ FTP Module ]             [ SMB Module ]
+         - Anon Login               - Null Sessions
+         - Banner Grabbing          - Share Enumeration
+         - Dir Enumeration          - Read/Write Checks
+              │                           │
+              └─────────────┬─────────────┘
+                            ▼
+               [ Sensitive File Finder ]
+                - Custom Regex Engine
+                - Credentials / SSH / DBs
+                            │
+                            ▼
+              [ Correlation & Path Engine ]
+                - Cross-Service Pivot Mapping
+                - Confidence Risk Scoring
+                            │
+              ┌─────────────┴─────────────┐
+              ▼                           ▼
+       [ Terminal UI ]            [ HTML Report ]
+       - Real-time Output         - Executive Summary
+       - Actionable Insights      - Formatted Evidence
 ```
 
 ---
 
-## Usage
+## 🚀 Installation & Setup
+
+Ensure you have Python 3.x installed on your system.
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/joshua-byte/PivotRaid.git
+   cd PivotRaid
+   ```
+
+2. **Install the required dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+---
+
+## 💻 Usage
+
+Run the orchestrator by passing the target IP address:
 
 ```bash
 python3 main.py -t <target_ip>
 ```
 
-Example:
+### Example
 
 ```bash
 python3 main.py -t 192.168.1.10
@@ -43,36 +86,27 @@ python3 main.py -t 192.168.1.10
 
 ---
 
-## Output
+## 📊 Sample Output
 
-### Terminal
-- Service status (OPEN/CLOSED)
-- Risk score and verdict
-- Findings and impact
-- Local attack paths
-- Cross-service attack paths
-
-### HTML Report
-- `report.html`
-  - Executive summary  
-  - Service-wise analysis  
-  - Evidence (files, shares)  
-  - Attack paths  
+<img width="1907" height="982" alt="image" src="https://github.com/user-attachments/assets/d0d69bbd-9218-4fd0-81c9-b3d49f5996b0" />
 
 ---
 
-## Project Structure
+## 📁 Project Structure
 
-```
+```text
 PivotRaid/
-├── main.py        # Orchestrator and correlation engine
-├── ftp.py         # FTP analysis module
-├── smb.py         # SMB analysis module
-├── report.py      # HTML report generator
-├── requirements.txt
+├── main.py          # Orchestrator and central correlation engine
+├── ftp.py           # FTP enumeration, banner grabbing, and scanning module
+├── smb.py           # SMB null session validation and share scanning module
+├── report.py        # Generates the styled HTML report with structured tables
+├── report.html      # Sample report output 
+├── requirements.txt # Project dependencies (e.g., impacket, beautifulsoup4)
+└── README.md        # Documentation
 ```
 
-## Disclaimer
+---
 
-This tool is intended for **educational purposes and authorized security testing only**.  
-Do not use it against systems without explicit permission.
+## ⚖️ Disclaimer
+
+This tool is intended solely for educational purposes, defensive hardening, and authorized security assessments. Operating this tool against targets without explicit, prior written permission from the system owner is illegal. The author accepts no liability for any misuse or damage caused by this software.
