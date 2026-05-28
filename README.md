@@ -282,11 +282,6 @@ PivotRaid/
 ├── report.py            # HTML report generation module
 ├── report.html          # Sample generated report
 ├── requirements.txt     # Project dependencies
-│
-├── images/
-│   ├── terminal_output.png
-│   └── report_preview.png
-│
 └── README.md
 ```
 
