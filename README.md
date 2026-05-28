@@ -10,7 +10,7 @@ By correlating data from both protocols, PivotRaid identifies how an attacker ca
 
 ---
 
-## 🛠️ Key Features
+## Key Features
 
 * **FTP Security Auditing:** Automatically tests for anonymous login, enumerates directories, and grabs service banners to flag outdated, vulnerable versions.
 * **SMB Share Analysis:** Validates null session access, enumerates active shares, and tests read/write permissions across accessible directories.
@@ -21,7 +21,7 @@ By correlating data from both protocols, PivotRaid identifies how an attacker ca
 
 ---
 
-## 📐 Tool Architecture & Data Flow
+## Tool Architecture & Data Flow
 
 ```
                       [ Target IP ]
@@ -53,7 +53,7 @@ By correlating data from both protocols, PivotRaid identifies how an attacker ca
 
 ---
 
-## 🚀 Installation & Setup
+## Installation & Setup
 
 Ensure you have Python 3.x installed on your system.
 
@@ -86,13 +86,13 @@ python3 main.py -t 192.168.1.10
 
 ---
 
-## 📊 Sample Output
+##  Sample Output
 
 <img width="1907" height="982" alt="image" src="https://github.com/user-attachments/assets/d0d69bbd-9218-4fd0-81c9-b3d49f5996b0" />
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```text
 PivotRaid/
