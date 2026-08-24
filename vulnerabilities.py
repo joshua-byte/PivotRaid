@@ -3,129 +3,407 @@ import json
 import shutil
 import logging
 
+
 logger = logging.getLogger("PivotRaid.Vulns")
 
-# ---------------------------------------------------------------------------
-# High-Profile Fallback Static Signature Engine
-# ---------------------------------------------------------------------------
-# This guarantees that even if searchsploit is missing, broken, or offline,
-# PivotRaid will ALWAYS flag critical, industry-defining vulnerabilities.
-STATIC_CVE_SIGNATURES = {
-    "ftp": {
-        "vsftpd": {
-            "2.3.4": [
-                {
-                    "id": "17491",
-                    "title": "vsFTPd 2.3.4 - Backdoor Command Execution (Metasploit)",
-                    "cve": "CVE-2011-2523",
-                    "severity": "CRITICAL",
-                    "score": 95,
-                    "url": "https://www.exploit-db.com/exploits/17491"
-                }
-            ]
-        }
-    },
-    "smb": {
-        "microsoft-ds": {
-            "1.0": [
-                {
-                    "id": "41891",
-                    "title": "Microsoft Windows - 'EternalBlue' SMB Remote Code Execution (MS17-010)",
-                    "cve": "CVE-2017-0143",
-                    "severity": "CRITICAL",
-                    "score": 95,
-                    "url": "https://www.exploit-db.com/exploits/41891"
-                }
-            ]
+
+# ============================================================================
+# Normalize SearchSploit Results
+# ============================================================================
+
+def normalize_exploit_result(
+    exploit,
+    product,
+    version,
+    platform
+):
+    """
+    Convert a raw SearchSploit JSON result into the
+    normalized PivotRaid vulnerability structure.
+
+    This function does not determine exploitability.
+    It only normalizes SearchSploit output.
+    """
+
+    title = exploit.get(
+        "Title",
+        ""
+    )
+
+    path = exploit.get(
+        "Path",
+        ""
+    )
+
+    edb_id = str(
+        exploit.get(
+            "EDB-ID",
+            ""
+        )
+    )
+
+    severity, score = analyze_exploit_severity(
+        title
+    )
+
+    return {
+        "id": edb_id,
+
+        "title": title,
+
+        "path": path,
+
+        "severity": severity,
+
+        "score": score,
+
+        "url": (
+            "https://www.exploit-db.com/"
+            f"exploits/{edb_id}"
+        ),
+
+        "lookup": {
+            "product": product,
+            "version": version,
+            "platform": platform
         }
     }
-}
 
-# ---------------------------------------------------------------------------
-# Core Query Function
-# ---------------------------------------------------------------------------
-def query_searchsploit(software_name, version=""):
+
+# ============================================================================
+# SearchSploit Query Engine
+# ============================================================================
+
+def query_searchsploit(
+    product,
+    version="",
+    platform="",
+    service=""
+):
     """
-    Queries the local searchsploit database and falls back to a 
-    static high-profile signature matching engine if offline or failed.
+    Query the local SearchSploit database using structured
+    service evidence.
+
+    SearchSploit is the sole vulnerability intelligence
+    source used by PivotRaid.
+
+    This function performs lookup only. It does not
+    establish exploitability.
     """
-    software_clean = software_name.lower().strip()
-    version_clean = version.lower().strip()
 
-    # Phase A: Check Fallback Static Signatures
-    for service_type, software_dict in STATIC_CVE_SIGNATURES.items():
-        if software_clean in software_dict:
-            if version_clean in software_dict[software_clean]:
-                logger.debug(f"Static signature match found: {software_clean} {version_clean}")
-                return software_dict[software_clean][version_clean]
+    product_clean = (
+        product or ""
+    ).lower().strip()
 
-    # Phase B: Run searchsploit system command
-    if not shutil.which("searchsploit"):
-        logger.debug("searchsploit binary not found in system PATH. Skipping live query.")
+    version_clean = (
+        version or ""
+    ).lower().strip()
+
+    platform_clean = (
+        platform or ""
+    ).lower().strip()
+
+    service_clean = (
+        service or ""
+    ).lower().strip()
+
+    if not product_clean:
+
+        logger.debug(
+            "SearchSploit lookup skipped: "
+            "product was not identified."
+        )
+
         return []
 
-    search_term = f"{software_clean} {version_clean}".strip()
+    if not shutil.which("searchsploit"):
+
+        logger.warning(
+            "SearchSploit binary not found "
+            "in system PATH."
+        )
+
+        return []
+
+    # ------------------------------------------------------------------------
+    # Product + version
+    #
+    # Platform and service are retained as contextual
+    # metadata rather than automatically added to the
+    # SearchSploit query.
+    # ------------------------------------------------------------------------
+
+    search_terms = [
+        product_clean
+    ]
+
+    if version_clean:
+
+        search_terms.append(
+            version_clean
+        )
+
+    search_term = " ".join(
+        search_terms
+    )
+
+    logger.info(
+        "SearchSploit lookup: "
+        f"{search_term}"
+    )
+
     try:
-        # Run searchsploit with JSON output configuration
+
         process = subprocess.run(
-            ["searchsploit", search_term, "--json"],
+            [
+                "searchsploit",
+                "--json",
+                search_term
+            ],
+
             stdout=subprocess.PIPE,
+
             stderr=subprocess.PIPE,
+
             text=True,
+
             timeout=5
         )
-        
+
         if not process.stdout.strip():
+
+            logger.debug(
+                "SearchSploit returned no output "
+                f"for: {search_term}"
+            )
+
             return []
 
-        data = json.loads(process.stdout)
-        # Searchsploit JSON uses the "RESULTS_EXPLOIT" key for standard exploits
-        results = data.get("RESULTS_EXPLOIT", [])
-        
-        filtered_vulns = []
-        for exploit in results:
-            title = exploit.get("Title", "")
-            path = exploit.get("Path", "")
-            edb_id = exploit.get("EDB-ID", "")
+        data = json.loads(
+            process.stdout
+        )
 
-            # Infer severity based on keyword heuristics
-            severity, score = analyze_exploit_severity(title)
-            
-            # We filter for HIGH and CRITICAL findings to keep report noise low
-            if severity in ["HIGH", "CRITICAL"]:
-                filtered_vulns.append({
-                    "id": edb_id,
-                    "title": title,
-                    "path": path,
-                    "severity": severity,
-                    "score": score,
-                    "url": f"https://www.exploit-db.com/exploits/{edb_id}"
-                })
-                
+        results = data.get(
+            "RESULTS_EXPLOIT",
+            []
+        )
+
+        logger.debug(
+            "SearchSploit returned "
+            f"{len(results)} raw result(s) "
+            f"for: {search_term}"
+        )
+
+        filtered_vulns = []
+
+        for exploit in results:
+
+            normalized = normalize_exploit_result(
+                exploit=exploit,
+                product=product,
+                version=version,
+                platform=platform
+            )
+
+            if normalized["severity"] in [
+                "HIGH",
+                "CRITICAL"
+            ]:
+
+                filtered_vulns.append(
+                    normalized
+                )
+
+        logger.info(
+            "SearchSploit produced "
+            f"{len(filtered_vulns)} HIGH/CRITICAL "
+            f"candidate(s) for {search_term}"
+        )
+
         return filtered_vulns
 
     except subprocess.TimeoutExpired:
-        logger.warning(f"Searchsploit query timed out for term: {search_term}")
-        return []
-    except Exception as e:
-        logger.debug(f"Error querying searchsploit: {e}")
+
+        logger.warning(
+            "SearchSploit query timed out "
+            f"for term: {search_term}"
+        )
+
         return []
 
-# ---------------------------------------------------------------------------
-# Heuristic Scoring Engine
-# ---------------------------------------------------------------------------
-def analyze_exploit_severity(title):
-    """Categorizes exploit titles into threat classes and scores."""
-    title_lower = title.lower()
-    
-    # Critical threat vectors (Remote Execution / Auth Bypasses)
-    if any(k in title_lower for k in ["rce", "remote code execution", "auth bypass", "authentication bypass", "backdoor"]):
+    except json.JSONDecodeError as error:
+
+        logger.warning(
+            "SearchSploit returned invalid JSON "
+            f"for {search_term}: {error}"
+        )
+
+        return []
+
+    except OSError as error:
+
+        logger.warning(
+            "SearchSploit execution failed: "
+            f"{error}"
+        )
+
+        return []
+
+    except Exception as error:
+
+        logger.debug(
+            "Unexpected SearchSploit error: "
+            f"{error}"
+        )
+
+        return []
+
+
+# ============================================================================
+# Structured Fingerprint → SearchSploit
+# ============================================================================
+
+def query_from_fingerprint(
+    fingerprint
+):
+    """
+    Query SearchSploit directly from a structured
+    service fingerprint.
+
+    Expected structure:
+
+        {
+            "service": {
+                "name": "ssh"
+            },
+
+            "identification": {
+                "software": "OpenSSH",
+                "version": "4.7p1",
+                "platform": "Ubuntu"
+            }
+        }
+    """
+
+    if not fingerprint:
+        return []
+
+    service_info = fingerprint.get(
+        "service",
+        {}
+    )
+
+    service = service_info.get(
+        "name",
+        ""
+    )
+
+    identification = fingerprint.get(
+        "identification",
+        {}
+    )
+
+    product = identification.get(
+        "software"
+    )
+
+    version = identification.get(
+        "version"
+    )
+
+    platform = identification.get(
+        "platform"
+    )
+
+    if not product:
+
+        logger.debug(
+            "Fingerprint does not contain "
+            "an identifiable product."
+        )
+
+        return []
+
+    return query_searchsploit(
+        product=product,
+        version=version or "",
+        platform=platform or "",
+        service=service
+    )
+
+
+# ============================================================================
+# Exploit Severity Heuristic
+# ============================================================================
+
+def analyze_exploit_severity(
+    title
+):
+    """
+    Categorize SearchSploit exploit titles into
+    PivotRaid threat classes.
+
+    This is a reporting heuristic.
+
+    It is NOT a determination that the target is
+    actually vulnerable or exploitable.
+    """
+
+    title_lower = (
+        title or ""
+    ).lower()
+
+    # ------------------------------------------------------------------------
+    # Critical
+    # ------------------------------------------------------------------------
+
+    if any(
+        keyword in title_lower
+        for keyword in [
+            "rce",
+            "remote code execution",
+            "auth bypass",
+            "authentication bypass",
+            "backdoor"
+        ]
+    ):
+
         return "CRITICAL", 95
-    # High threat vectors (Local Privilege Escalation / Overflows / File Writes)
-    elif any(k in title_lower for k in ["buffer overflow", "privilege escalation", "arbitrary file", "upload"]):
+
+    # ------------------------------------------------------------------------
+    # High
+    # ------------------------------------------------------------------------
+
+    elif any(
+        keyword in title_lower
+        for keyword in [
+            "buffer overflow",
+            "privilege escalation",
+            "arbitrary file",
+            "upload"
+        ]
+    ):
+
         return "HIGH", 80
-    # Medium threat vectors (Info Leakage / Traversal / Crash-DoS)
-    elif any(k in title_lower for k in ["disclosure", "traversal", "dos", "denial of service"]):
+
+    # ------------------------------------------------------------------------
+    # Medium
+    # ------------------------------------------------------------------------
+
+    elif any(
+        keyword in title_lower
+        for keyword in [
+            "disclosure",
+            "traversal",
+            "dos",
+            "denial of service"
+        ]
+    ):
+
         return "MEDIUM", 50
-    
+
+    # ------------------------------------------------------------------------
+    # Low
+    # ------------------------------------------------------------------------
+
     return "LOW", 25
