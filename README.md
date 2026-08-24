@@ -4,13 +4,14 @@
 ![Offensive Security](https://img.shields.io/badge/Focus-OffensiveSecurity-red)
 ![SMB](https://img.shields.io/badge/Protocol-SMB-green)
 ![FTP](https://img.shields.io/badge/Protocol-FTP-orange)
+![SSH](https://img.shields.io/badge/Protocol-SSH-blue)
 ![Status](https://img.shields.io/badge/Status-Active-success)
 
-PivotRaid is a lightweight, red-team-oriented automation tool designed to analyze exposed FTP and SMB services. It automates the repetitive process of service enumeration to identify weak configurations, exposed shares, sensitive-file leakage, and realistic lateral movement opportunities across network services.
+PivotRaid is a lightweight, red-team-oriented automation tool designed to analyze exposed FTP, SMB, and SSH services. It automates the repetitive process of service enumeration to identify weak configurations, exposed shares, sensitive-file leakage, SSH service fingerprints, and realistic lateral movement opportunities across network services.
 
-Rather than treating services independently, PivotRaid correlates findings between FTP and SMB to model how attackers can chain exposures together during internal-network compromise scenarios.
+Rather than treating services independently, PivotRaid correlates findings between FTP, SMB, and SSH to model how attackers can chain exposures together during internal-network compromise scenarios.
 
-The platform focuses on attack-surface analysis, credential exposure discovery, and offensive workflow automation for controlled VAPT and defensive-security assessment environments.
+The platform focuses on attack-surface analysis, credential exposure discovery, SSH fingerprinting, vulnerability correlation through SearchSploit, and offensive workflow automation for controlled VAPT and defensive-security assessment environments.
 
 ---
 
@@ -18,6 +19,8 @@ The platform focuses on attack-surface analysis, credential exposure discovery, 
 
 * FTP enumeration and exposure analysis
 * SMB share enumeration and null-session validation
+* SSH banner fingerprinting and version identification
+* SearchSploit-based SSH vulnerability correlation
 * Automated sensitive-file discovery
 * Cross-service attack-path correlation
 * Risk scoring and severity classification
@@ -31,13 +34,14 @@ The platform focuses on attack-surface analysis, credential exposure discovery, 
 
 # Why PivotRaid?
 
-Traditional enumeration workflows across FTP and SMB services are often repetitive, fragmented, and manually intensive during internal-network assessments.
+Traditional enumeration workflows across FTP, SMB, and SSH services are often repetitive, fragmented, and manually intensive during internal-network assessments.
 
 PivotRaid was designed to:
 
 * automate cross-service reconnaissance,
 * identify realistic attack-pivot opportunities,
 * correlate exposed services,
+* fingerprint SSH implementations,
 * and model attacker workflows caused by weak legacy configurations.
 
 Rather than simply enumerating open services, PivotRaid focuses on how attackers can leverage exposed resources to expand access and move laterally across a network environment.
@@ -51,6 +55,8 @@ PivotRaid focuses on:
 * attack-surface mapping,
 * service enumeration,
 * credential exposure analysis,
+* SSH service fingerprinting,
+* vulnerability intelligence correlation,
 * lateral movement simulation,
 * offensive security automation,
 * and VAPT-oriented reconnaissance workflows.
@@ -61,17 +67,19 @@ The platform is intended for internal-network security assessments and controlle
 
 # Tool Architecture & Data Flow
 
-```text id="3zccsu"
+```text
                       [ Target IP ]
                             │
-              ┌─────────────┴─────────────┐
-              ▼                           ▼
-        [ FTP Module ]             [ SMB Module ]
-         - Banner Grabbing          - Share Enumeration
-         - Anonymous Login          - Null Sessions
-         - Directory Enumeration    - Read/Write Checks
-              │                           │
-              └─────────────┬─────────────┘
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+        [ FTP Module ] [ SMB Module ] [ SSH Module ]
+         - Banner Grab  - Share Enum    - SSH Banner
+         - Anonymous    - Null Sessions - Version ID
+           Login       - Read/Write     - Platform ID
+         - Directory     Checks          - Fingerprint
+           Enumeration
+              │             │             │
+              └─────────────┼─────────────┘
                             ▼
                [ Sensitive File Finder ]
                 - Credential Discovery
@@ -80,6 +88,7 @@ The platform is intended for internal-network security assessments and controlle
                             ▼
               [ Correlation & Path Engine ]
                 - Cross-Service Pivot Mapping
+                - SearchSploit Correlation
                 - Risk Scoring
                 - Attack Path Analysis
                             │
@@ -103,6 +112,9 @@ Example findings included:
 * anonymous FTP access,
 * accessible SMB shares,
 * null-session exposure,
+* legacy SSH services,
+* SSH software/version fingerprints,
+* SearchSploit vulnerability candidates,
 * and potential lateral movement pathways caused by weak service configurations.
 
 The platform automatically correlates findings across services to identify realistic attack-pivot opportunities and prioritize remediation workflows.
@@ -113,7 +125,6 @@ The platform automatically correlates findings across services to identify reali
 
 <img width="1423" height="992" alt="t_out_1" src="https://github.com/user-attachments/assets/114179b3-7275-4493-a91c-64b937157e23" />
 <img width="1405" height="478" alt="t_out_2" src="https://github.com/user-attachments/assets/137462a8-a8b5-4abc-8484-16978e01e847" />
-
 
 The terminal output provides:
 
@@ -131,13 +142,14 @@ Example findings include:
 * Accessible network shares
 * Plaintext credential transmission
 * Legacy protocol weaknesses
+* SSH software and version fingerprinting
+* SearchSploit vulnerability candidates
 
 ---
 
 # HTML Report Preview
 
 <img width="1475" height="821" alt="report" src="https://github.com/user-attachments/assets/991fe87f-4e69-40d0-b6b0-ae1363553180" />
-
 
 The HTML reporting module generates structured offensive-security assessment reports including:
 
@@ -168,11 +180,20 @@ The reporting system is designed to simulate lightweight internal-security asses
 * Plaintext credential transmission
 * Directory enumeration exposure
 
+## SSH Findings
+
+* SSH service exposed
+* SSH banner identified
+* OpenSSH implementation fingerprinted
+* OpenSSH version identified
+* Platform information identified from banner
+* SearchSploit vulnerability candidates correlated
+
 ---
 
 # Example Attack Path
 
-```text id="dbq3g8"
+```text
 Null SMB Session
         ↓
 Enumerate SMB Shares
@@ -199,6 +220,7 @@ PivotRaid assigns confidence-based severity scores using factors including:
 * authentication weaknesses,
 * accessible network shares,
 * sensitive-file exposure,
+* SSH vulnerability candidates,
 * and cross-service attack-pivot opportunities.
 
 Severity levels:
@@ -229,14 +251,14 @@ Ensure Python 3.x is installed on your system.
 
 ## Clone Repository
 
-```bash id="r3o3wp"
+```bash
 git clone https://github.com/joshua-byte/PivotRaid.git
 cd PivotRaid
 ```
 
 ## Install Dependencies
 
-```bash id="6yoj5k"
+```bash
 pip install -r requirements.txt
 ```
 
@@ -246,13 +268,13 @@ pip install -r requirements.txt
 
 Run the orchestrator by passing the target IP address:
 
-```bash id="ezm8xm"
+```bash
 python3 main.py -t <target_ip>
 ```
 
 Example:
 
-```bash id="0kgbw7"
+```bash
 python3 main.py -t 192.168.1.10
 ```
 
@@ -266,6 +288,8 @@ PivotRaid was tested in controlled vulnerable-lab environments including:
 * Samba vulnerable containers
 * Legacy FTP services
 * Intentionally exposed SMB shares
+* Ubuntu SSH servers
+* Legacy OpenSSH services
 
 The project should only be used in authorized and controlled environments.
 
@@ -273,12 +297,14 @@ The project should only be used in authorized and controlled environments.
 
 # Project Structure
 
-```text id="x89u4s"
+```text
 PivotRaid/
 │
 ├── main.py              # Main orchestrator and correlation engine
 ├── ftp.py               # FTP enumeration and exposure analysis
 ├── smb.py               # SMB share enumeration and validation
+├── ssh.py               # SSH banner fingerprinting and analysis
+├── vulnerabilities.py   # SearchSploit vulnerability correlation
 ├── report.py            # HTML report generation module
 ├── report.html          # Sample generated report
 ├── requirements.txt     # Project dependencies
@@ -292,7 +318,7 @@ PivotRaid/
 * Automated credential validation
 * Recursive share crawling
 * Multi-service correlation expansion
-* LDAP and SSH integration
+* LDAP integration
 * Attack-path graph visualization
 * ATT&CK-aligned reporting
 * SIEM integration
@@ -312,6 +338,7 @@ Defensive recommendations include:
 * Harden share permissions
 * Remove exposed sensitive files
 * Disable legacy insecure services
+* Keep SSH implementations updated
 * Monitor unusual internal enumeration activity
 
 ---
