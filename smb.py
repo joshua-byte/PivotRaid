@@ -1,401 +1,1474 @@
 import time
 import logging
+
 from impacket.smbconnection import SMBConnection
 
-# Local import from our custom vulnerability engine
+
+# ============================================================================
+# Local vulnerability engine
+# ============================================================================
+
 try:
     from vulnerabilities import query_searchsploit
 except ImportError:
-    # Fallback to prevent crashes if run standalone
-    def query_searchsploit(software, version): return []
 
-# ---------------------------------------------------------------------------
-# Setup Module-Specific Logger (No raw print statements allowed)
-# ---------------------------------------------------------------------------
+    def query_searchsploit(
+        software,
+        version,
+    ):
+        return []
+
+
 logger = logging.getLogger("PivotRaid.SMB")
 
-# ---------------------------------------------------------------------------
-# Core SMB Scanner Class (OOP Pattern)
-# ---------------------------------------------------------------------------
+
+# ============================================================================
+# SMB Scanner
+# ============================================================================
+
 class SMBScanner:
     """
-    An enterprise-grade, state-aware scanner for evaluating SMB dialect support,
-    signing enforcement, null sessions, credential exposure, and share classification.
+    SMB-specific security assessment module.
+
+    Responsibilities:
+        - Establish SMB connection
+        - Identify SMB dialect
+        - Check signing enforcement
+        - Audit null sessions / weak credentials
+        - Enumerate shares
+        - Test share accessibility
+        - Perform bounded file enumeration
+        - Classify potentially sensitive files
+        - Collect structured evidence
+        - Identify vulnerability candidates
+
+    This module does NOT:
+        - Calculate global risk
+        - Generate cross-service attack paths
+        - Execute exploits
+        - Perform unrestricted brute-force operations
+
+    Global scoring and correlation are handled by the central
+    PivotRaid risk/correlation layers.
+
+    IMPORTANT
+    ---------
+    SearchSploit results are vulnerability CANDIDATES.
+
+    They are stored in result["vulns"] and are NOT converted into
+    independent HIGH/CRITICAL findings.
+
+    This prevents vulnerability lookup results from being counted
+    twice by the central risk engine.
     """
-    def __init__(self, target, timeout=5):
+
+    # ========================================================================
+    # Initialization
+    # ========================================================================
+
+    def __init__(
+        self,
+        target,
+        timeout=5,
+    ):
+
         self.target = target
+
         self.timeout = timeout
+
         self.conn = None
 
-        # Explicit initialization schema matching ftp.py
         self.result = {
+
+            # ----------------------------------------------------------------
+            # Service identity
+            # ----------------------------------------------------------------
+
             "service": "SMB",
+
             "port": 445,
+
             "status": "CLOSED",
+
+            # ----------------------------------------------------------------
+            # Structured findings
+            # ----------------------------------------------------------------
+
             "findings": [],
-            "impact": [],
-            "score": 0,
-            "confidence": 0,
-            "verdict": "",
-            "scan_time": 0,
-            "shares": [],
-            "accessible_shares": [],
-            "anonymous": False,
-            "weak_creds": "",
-            "vulns": [],
-            "classified_hits": {},
-            "attack_path": [],
+
+            # ----------------------------------------------------------------
+            # Evidence
+            # ----------------------------------------------------------------
+
             "evidence": {
+                "dialect": None,
+                "dialect_name": None,
+                "signing_required": None,
                 "shares": [],
-                "sample_files": []
-            }
+                "sample_files": [],
+            },
+
+            # ----------------------------------------------------------------
+            # Authentication
+            # ----------------------------------------------------------------
+
+            "anonymous": False,
+
+            "weak_creds": None,
+
+            # ----------------------------------------------------------------
+            # Share exposure
+            # ----------------------------------------------------------------
+
+            "shares": [],
+
+            "accessible_shares": [],
+
+            # ----------------------------------------------------------------
+            # File classification
+            # ----------------------------------------------------------------
+
+            "file_count": 0,
+
+            "classified_hits": {},
+
+            # ----------------------------------------------------------------
+            # Vulnerability candidates
+            # ----------------------------------------------------------------
+
+            "vulns": [],
+
+            # ----------------------------------------------------------------
+            # Timing
+            # ----------------------------------------------------------------
+
+            "scan_time": 0,
+
+            # ----------------------------------------------------------------
+            # Compatibility fields
+            #
+            # Global risk scoring and attack paths are handled elsewhere.
+            # ----------------------------------------------------------------
+
+            "impact": [],
+
+            "score": 0,
+
+            "confidence": 0,
+
+            "verdict": "",
+
         }
 
-    def add_score(self, value, reason, confidence=5):
-        """Standardized risk-scoring injection mechanism."""
-        self.result["score"] += value
-        self.result["confidence"] += confidence
-        self.result["findings"].append(reason)
-        logger.debug(f"Score adjusted (+{value}) -> Total: {self.result['score']} | Reason: {reason}")
+    # ========================================================================
+    # Finding helper
+    # ========================================================================
 
-    def normalize_score(self):
-        """Asymptotic scoring compression to prevent score overflows."""
-        if self.result["score"] > 85:
-            self.result["score"] = int(85 + (self.result["score"] - 85) * 0.5)
-        self.result["score"] = min(self.result["score"], 100)
+    def add_finding(
+        self,
+        title,
+        severity="INFO",
+        confidence="HIGH",
+        category="general",
+        evidence=None,
+        impact=None,
+    ):
+        """
+        Add a normalized finding to the assessment.
 
-    def get_verdict(self):
-        score = self.result["score"]
-        if score >= 90:
-            return "CRITICAL – Immediate exploitation possible"
-        elif score >= 70:
-            return "HIGH – Significant security risk"
-        elif score >= 40:
-            return "MEDIUM – Moderate exposure"
-        return "LOW – Limited risk"
+        Severity:
+            INFO / LOW / MEDIUM / HIGH / CRITICAL
 
-    # -----------------------------------------------------------------------
-    # Layer 1: Protocol Negotiation & Connection
-    # -----------------------------------------------------------------------
-    def establish_connection(self):
-        """Attempts to negotiate and establish an initial raw SMB connection."""
+        Confidence:
+            LOW / MEDIUM / HIGH
+
+        Findings represent observed conditions.
+
+        Vulnerability candidates belong in result["vulns"].
+        """
+
+        valid_severities = {
+            "INFO",
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "CRITICAL",
+        }
+
+        valid_confidence = {
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+        }
+
+        severity = str(
+            severity or "INFO"
+        ).upper()
+
+        confidence = str(
+            confidence or "HIGH"
+        ).upper()
+
+        if severity not in valid_severities:
+            severity = "MEDIUM"
+
+        if confidence not in valid_confidence:
+            confidence = "MEDIUM"
+
+        finding = {
+            "title": title,
+
+            "severity": severity,
+
+            "confidence": confidence,
+
+            "category": category,
+
+            "evidence": evidence or {},
+        }
+
+        self.result[
+            "findings"
+        ].append(
+            finding
+        )
+
+        if impact:
+
+            self.result[
+                "impact"
+            ].append(
+                impact
+            )
+
+        logger.debug(
+            "SMB finding: [%s] %s",
+            severity,
+            title,
+        )
+
+    # ========================================================================
+    # Layer 1: SMB connection
+    # ========================================================================
+
+    def establish_connection(
+        self,
+    ):
+        """
+        Establish an SMB connection and allow Impacket to negotiate
+        the protocol dialect.
+        """
+
         try:
-            # Impacket SMBConnection handles negotiation automatically
-            self.conn = SMBConnection(self.target, self.target, sess_port=445, timeout=self.timeout)
-            self.result["status"] = "OPEN"
+
+            self.conn = SMBConnection(
+                self.target,
+                self.target,
+                sess_port=445,
+                timeout=self.timeout,
+            )
+
+            self.result[
+                "status"
+            ] = "OPEN"
+
+            self.add_finding(
+                title=(
+                    "SMB service is accessible"
+                ),
+                severity="INFO",
+                confidence="HIGH",
+                category="availability",
+                evidence={
+                    "target": self.target,
+                    "port": 445,
+                },
+            )
+
             return True
-        except Exception as e:
-            self.result["findings"].append("[INFO] SMB service not accessible.")
-            logger.debug(f"Connection failure to {self.target}:445 - {e}")
+
+        except Exception as exc:
+
+            logger.debug(
+                "SMB connection failed to %s:445 - %s",
+                self.target,
+                exc,
+            )
+
+            self.add_finding(
+                title=(
+                    "SMB service is not accessible"
+                ),
+                severity="INFO",
+                confidence="HIGH",
+                category="availability",
+                evidence={
+                    "target": self.target,
+                    "port": 445,
+                    "error": str(exc),
+                },
+            )
+
             return False
 
-    # -----------------------------------------------------------------------
-    # Layer 2: Dialect Analysis & Message Signing Verification
-    # -----------------------------------------------------------------------
-    def analyze_protocol_properties(self):
-        """Audits target signing requirements and negotiates dialects to discover CVEs."""
+    # ========================================================================
+    # Layer 2: Protocol properties
+    # ========================================================================
+
+    def analyze_protocol_properties(
+        self,
+    ):
+        """
+        Inspect SMB signing requirements and negotiated dialect.
+        """
+
         if not self.conn:
             return
 
-        # Phase A: Check SMB Signing Enforcement
-        try:
-            if self.conn.isSigningRequired():
-                self.result["findings"].append("[INFO] SMB signing is enforced.")
-            else:
-                self.add_score(20, "[HIGH] SMB signing not required", 10)
-                self.result["impact"].append("Susceptible to local SMB authentication relaying attacks (e.g., ntlmrelayx).")
-        except Exception as e:
-            self.result["findings"].append("[INFO] Could not determine SMB signing enforcement.")
-            logger.debug(f"Signing query error: {e}")
+        # ====================================================================
+        # SMB signing
+        # ====================================================================
 
-        # Phase B: Analyze Negotiated SMB Dialect
         try:
+
+            signing_required = (
+                self.conn.isSigningRequired()
+            )
+
+            self.result[
+                "evidence"
+            ][
+                "signing_required"
+            ] = bool(
+                signing_required
+            )
+
+            if signing_required:
+
+                self.add_finding(
+                    title=(
+                        "SMB signing is required"
+                    ),
+                    severity="INFO",
+                    confidence="HIGH",
+                    category="protocol_security",
+                    evidence={
+                        "signing_required": True,
+                    },
+                )
+
+            else:
+
+                self.add_finding(
+                    title=(
+                        "SMB signing is not required"
+                    ),
+                    severity="HIGH",
+                    confidence="HIGH",
+                    category="protocol_security",
+                    evidence={
+                        "signing_required": False,
+                    },
+                    impact=(
+                        "Lack of mandatory SMB signing may increase "
+                        "exposure to authentication-relay attacks "
+                        "depending on the surrounding network configuration."
+                    ),
+                )
+
+        except Exception as exc:
+
+            logger.debug(
+                "Unable to determine SMB signing state: %s",
+                exc,
+            )
+
+            self.add_finding(
+                title=(
+                    "SMB signing requirement "
+                    "could not be determined"
+                ),
+                severity="INFO",
+                confidence="LOW",
+                category="protocol_security",
+                evidence={
+                    "error": str(exc),
+                },
+            )
+
+        # ====================================================================
+        # SMB dialect
+        # ====================================================================
+
+        try:
+
             dialect = self.conn.getDialect()
+
             dialect_map = {
                 0x0100: "SMBv1 (NT LM 0.12)",
                 0x0202: "SMB 2.0.2",
                 0x0210: "SMB 2.1",
                 0x0300: "SMB 3.0",
                 0x0302: "SMB 3.0.2",
-                0x0311: "SMB 3.1.1"
+                0x0311: "SMB 3.1.1",
             }
 
-            dialect_name = dialect_map.get(dialect, f"Unknown (0x{dialect:X})")
-            self.result["findings"].append(f"[INFO] Negotiated Dialect: {dialect_name}")
+            dialect_name = dialect_map.get(
+                dialect,
+                f"Unknown (0x{dialect:X})",
+            )
 
-            # SMBv1 (0x0100) check -> High vulnerability risk (EternalBlue MS17-010)
+            self.result[
+                "evidence"
+            ][
+                "dialect"
+            ] = dialect
+
+            self.result[
+                "evidence"
+            ][
+                "dialect_name"
+            ] = dialect_name
+
+            self.add_finding(
+                title=(
+                    f"Negotiated SMB dialect: "
+                    f"{dialect_name}"
+                ),
+                severity="INFO",
+                confidence="HIGH",
+                category="fingerprinting",
+                evidence={
+                    "dialect": dialect,
+                    "dialect_name": dialect_name,
+                },
+            )
+
+            # ------------------------------------------------------------
+            # SMBv1
+            # ------------------------------------------------------------
+
             if dialect == 0x0100:
-                self.add_score(30, "[HIGH] Deprecated SMBv1 protocol detected", 15)
-                self.result["impact"].append("Legacy SMBv1 is highly susceptible to critical remote execution exploits like MS17-010.")
 
-                # Active SearchSploit lookup for SMBv1 exploits
-                exploits = query_searchsploit("Samba" if "Samba" in dialect_name else "SMBv1", "")
-                if exploits:
-                    self.result["vulns"].extend(exploits)
-                    max_exploit = max(exploits, key=lambda x: x["score"])
-                    self.add_score(max_exploit["score"], f"[CRITICAL] EDB Exploit Found: {max_exploit['title']}", 20)
+                self.add_finding(
+                    title=(
+                        "Deprecated SMBv1 protocol detected"
+                    ),
+                    severity="HIGH",
+                    confidence="HIGH",
+                    category="protocol_security",
+                    evidence={
+                        "dialect": "SMBv1",
+                        "dialect_code": dialect,
+                    },
+                    impact=(
+                        "SMBv1 is an obsolete protocol with a history "
+                        "of serious security vulnerabilities."
+                    ),
+                )
 
-        except Exception as e:
-            self.result["findings"].append("[INFO] Failed to identify SMB dialect.")
-            logger.debug(f"Dialect retrieval error: {e}")
+                # --------------------------------------------------------
+                # SearchSploit lookup
+                #
+                # Results are candidates only.
+                # --------------------------------------------------------
 
-    # -----------------------------------------------------------------------
-    # Layer 3: Authentication Auditing (Null Sessions & Weak Creds)
-    # -----------------------------------------------------------------------
-    def audit_authentication(self):
-        """Audits authentication barriers for null sessions or weak system credentials."""
+                try:
+
+                    exploits = query_searchsploit(
+                        "SMBv1",
+                        "",
+                    )
+
+                except Exception as exc:
+
+                    exploits = []
+
+                    logger.debug(
+                        "SMBv1 SearchSploit query failed: %s",
+                        exc,
+                    )
+
+                self._record_vulnerability_candidates(
+                    exploits,
+                    software="SMBv1",
+                    version="",
+                )
+
+        except Exception as exc:
+
+            logger.debug(
+                "SMB dialect retrieval failed: %s",
+                exc,
+            )
+
+            self.add_finding(
+                title=(
+                    "SMB dialect could not be determined"
+                ),
+                severity="INFO",
+                confidence="LOW",
+                category="fingerprinting",
+                evidence={
+                    "error": str(exc),
+                },
+            )
+
+    # ========================================================================
+    # Vulnerability normalization
+    # ========================================================================
+
+    def _record_vulnerability_candidates(
+        self,
+        exploits,
+        software=None,
+        version=None,
+    ):
+        """
+        Store vulnerability candidates without treating them as
+        confirmed vulnerabilities or duplicating them as risk findings.
+
+        SearchSploit output belongs exclusively in result["vulns"].
+
+        A vulnerability candidate is not itself an observed security
+        condition. The central risk engine may consider candidates as
+        contextual evidence, but they must not be converted into
+        independent HIGH/CRITICAL findings here.
+        """
+
+        if not exploits:
+            return
+
+        # --------------------------------------------------------------------
+        # Store candidates.
+        # --------------------------------------------------------------------
+
+        self.result[
+            "vulns"
+        ].extend(
+            exploits
+        )
+
+        # --------------------------------------------------------------------
+        # Add one informational discovery finding.
+        #
+        # INFO contributes zero risk in the central risk engine.
+        # --------------------------------------------------------------------
+
+        self.add_finding(
+            title=(
+                "SearchSploit identified "
+                f"{len(exploits)} vulnerability candidate(s)"
+            ),
+            severity="INFO",
+            confidence="HIGH",
+            category="vulnerability_discovery",
+            evidence={
+                "software": software,
+                "version": version,
+                "candidate_count": len(exploits),
+                "source": (
+                    "Exploit-DB/SearchSploit"
+                ),
+            },
+        )
+
+        logger.info(
+            "SMB SearchSploit identified %d "
+            "vulnerability candidate(s) for %s %s",
+            len(exploits),
+            software or "",
+            version or "",
+        )
+
+    # ========================================================================
+    # Layer 3: Authentication auditing
+    # ========================================================================
+
+    def audit_authentication(
+        self,
+    ):
+        """
+        Test null-session access and a very small set of common
+        credential pairs.
+
+        This is deliberately a limited audit and not a brute-force
+        mechanism.
+        """
+
         if not self.conn:
             return
 
-        # Phase A: Null Session Assessment (Empty User/Password)
-        try:
-            self.conn.login("", "")
-            self.result["anonymous"] = True
-            self.result["findings"].append("[INFO] Null session connection accepted.")
-            return  # No need to attempt dictionary brute force if null sessions work
-        except Exception as e:
-            self.result["findings"].append("[INFO] Null session connection rejected.")
-            logger.debug(f"Null session login denied: {e}")
+        # ====================================================================
+        # Null session
+        # ====================================================================
 
-        # Phase B: Targeted Weak Credential Audit
+        try:
+
+            self.conn.login(
+                "",
+                "",
+            )
+
+            self.result[
+                "anonymous"
+            ] = True
+
+            self.add_finding(
+                title=(
+                    "SMB null session accepted"
+                ),
+                severity="HIGH",
+                confidence="HIGH",
+                category="authentication",
+                evidence={
+                    "username": "",
+                    "authentication": "successful",
+                },
+                impact=(
+                    "Unauthenticated SMB sessions may permit access "
+                    "to information or shares depending on server policy."
+                ),
+            )
+
+            return
+
+        except Exception as exc:
+
+            logger.debug(
+                "SMB null session rejected: %s",
+                exc,
+            )
+
+            self.add_finding(
+                title=(
+                    "SMB null session rejected"
+                ),
+                severity="INFO",
+                confidence="HIGH",
+                category="authentication",
+                evidence={
+                    "authentication": (
+                        "null session denied"
+                    ),
+                },
+            )
+
+        # ====================================================================
+        # Controlled weak credential checks
+        # ====================================================================
+
         weak_pairs = [
             ("guest", ""),
             ("admin", "admin"),
             ("administrator", "password"),
-            ("user", "password")
+            ("user", "password"),
         ]
 
-        for user, pwd in weak_pairs:
+        for username, password in weak_pairs:
+
+            test_conn = None
+
             try:
-                # Reinitialize socket to prevent state leakage between auth attempts
-                self.conn.close()
-                self.conn = SMBConnection(self.target, self.target, sess_port=445, timeout=self.timeout)
-                self.conn.login(user, pwd)
 
-                self.result["weak_creds"] = f"{user}:{pwd}"
-                self.add_score(40, f"[CRITICAL] Weak credentials allowed: {user}:{pwd}", 15)
-                logger.info(f"Valid SMB credentials discovered -> {user}:{pwd}")
+                test_conn = SMBConnection(
+                    self.target,
+                    self.target,
+                    sess_port=445,
+                    timeout=self.timeout,
+                )
+
+                test_conn.login(
+                    username,
+                    password,
+                )
+
+                self.result[
+                    "weak_creds"
+                ] = {
+                    "username": username,
+                    "password": password,
+                }
+
+                self.add_finding(
+                    title=(
+                        "Common weak SMB credentials accepted"
+                    ),
+                    severity="CRITICAL",
+                    confidence="HIGH",
+                    category="authentication",
+                    evidence={
+                        "username": username,
+                        "credential_test": "successful",
+                    },
+                    impact=(
+                        "The tested credential pair provides "
+                        "authenticated SMB access."
+                    ),
+                )
+
+                logger.info(
+                    "Weak SMB credentials validated for %s",
+                    self.target,
+                )
+
                 return
-            except Exception:
-                continue
 
-    # -----------------------------------------------------------------------
-    # Layer 4: Share Enumeration & Access Control Mapping
-    # -----------------------------------------------------------------------
-    def enumerate_shares(self):
-        """Extracts visible SMB shares and divides them into administrative and standard paths."""
+            except Exception as exc:
+
+                logger.debug(
+                    "SMB credential pair rejected for %s: %s",
+                    username,
+                    exc,
+                )
+
+            finally:
+
+                if test_conn:
+
+                    try:
+                        test_conn.close()
+
+                    except Exception:
+                        pass
+
+    # ========================================================================
+    # Layer 4: Share enumeration
+    # ========================================================================
+
+    def enumerate_shares(
+        self,
+    ):
+        """
+        Enumerate SMB shares visible to the current session.
+        """
+
         if not self.conn:
             return []
 
         try:
-            shares = self.conn.listShares()
-            # Impakcet yields share structures with trailing null characters, clean them up cleanly
-            share_names = [s['shi1_netname'].strip('\x00').strip() for s in shares]
-            self.result["shares"] = share_names
 
-            normal = [s for s in share_names if not s.endswith("$")]
-            hidden = [s for s in share_names if s.endswith("$")]
+            shares = self.conn.listShares()
+
+            share_names = []
+
+            for share in shares:
+
+                try:
+
+                    name = (
+                        share[
+                            "shi1_netname"
+                        ]
+                        .strip("\x00")
+                        .strip()
+                    )
+
+                    if name:
+                        share_names.append(
+                            name
+                        )
+
+                except Exception:
+                    continue
+
+            self.result[
+                "shares"
+            ] = share_names
+
+            self.result[
+                "evidence"
+            ][
+                "shares"
+            ] = share_names
+
+            normal = [
+                name
+                for name in share_names
+                if not name.endswith("$")
+            ]
+
+            hidden = [
+                name
+                for name in share_names
+                if name.endswith("$")
+            ]
 
             if normal:
-                self.result["findings"].append(f"[INFO] Enumerated Shares: {', '.join(normal)}")
+
+                self.add_finding(
+                    title=(
+                        "SMB shares enumerated"
+                    ),
+                    severity="INFO",
+                    confidence="HIGH",
+                    category="enumeration",
+                    evidence={
+                        "shares": normal,
+                        "count": len(normal),
+                    },
+                )
+
             if hidden:
-                self.result["findings"].append(f"[INFO] Administrative Hidden Shares ($): {', '.join(hidden)}")
+
+                self.add_finding(
+                    title=(
+                        "Administrative SMB shares enumerated"
+                    ),
+                    severity="INFO",
+                    confidence="HIGH",
+                    category="enumeration",
+                    evidence={
+                        "shares": hidden,
+                        "count": len(hidden),
+                    },
+                )
 
             return share_names
-        except Exception as e:
-            self.result["findings"].append("[INFO] Unable to enumerate active shares.")
-            logger.debug(f"Share listing error: {e}")
+
+        except Exception as exc:
+
+            logger.debug(
+                "SMB share enumeration failed: %s",
+                exc,
+            )
+
+            self.add_finding(
+                title=(
+                    "SMB share enumeration failed"
+                ),
+                severity="INFO",
+                confidence="HIGH",
+                category="enumeration",
+                evidence={
+                    "error": str(exc),
+                },
+            )
+
             return []
 
-    def analyze_share_access(self, shares):
-        """Tests read permissions on listed shares to quantify sensitive file exposure."""
+    # ========================================================================
+    # Layer 4b: Share access
+    # ========================================================================
+
+    def analyze_share_access(
+        self,
+        shares,
+    ):
+        """
+        Test whether the current SMB session can list the root of
+        each discovered share.
+        """
+
         if not self.conn or not shares:
             return []
 
         accessible = []
-        for share in shares:
-            try:
-                # Test read capacity by listing the top root level directory
-                files = self.conn.listPath(share, '*')
-                accessible.append(share)
 
-                # Flag massive file shares for exfiltration scanning
-                if len(files) > 20:
-                    self.add_score(15, f"[HIGH] Large share file exposure in path: {share}", 10)
-            except Exception:
-                continue
+        for share in shares:
+
+            try:
+
+                files = self.conn.listPath(
+                    share,
+                    "*",
+                )
+
+                accessible.append(
+                    share
+                )
+
+                self.add_finding(
+                    title=(
+                        f"SMB share is readable: "
+                        f"{share}"
+                    ),
+                    severity="HIGH",
+                    confidence="HIGH",
+                    category="authorization",
+                    evidence={
+                        "share": share,
+                        "root_listing_entries": len(
+                            files
+                        ),
+                    },
+                    impact=(
+                        "The current SMB authentication context can "
+                        "enumerate content within this share."
+                    ),
+                )
+
+            except Exception as exc:
+
+                logger.debug(
+                    "Unable to access SMB share %s: %s",
+                    share,
+                    exc,
+                )
+
+        self.result[
+            "accessible_shares"
+        ] = accessible
 
         if accessible:
-            self.add_score(40, "[HIGH] Read privileges granted on active share drives", 15)
-            self.result["impact"].append("Unauthorized actors can list files, exfiltrate data, or locate backup containers.")
-            self.result["accessible_shares"] = accessible
-            self.result["evidence"]["shares"] = accessible
+
+            self.result[
+                "evidence"
+            ][
+                "shares"
+            ] = accessible
 
         return accessible
 
-    # -----------------------------------------------------------------------
-    # Layer 5: Safe Recursive File Crawling (Prevents Windows Traps)
-    # -----------------------------------------------------------------------
-    def list_files_safely(self, share, path="*", depth=1):
-        """
-        Safely explores folder structures, ignoring recursion traps and blacklisted paths.
-        """
-        collected = []
-        if depth < 0:
-            return collected
+    # ========================================================================
+    # Layer 5: Bounded recursive file enumeration
+    # ========================================================================
 
-        # Essential Windows directory exclusion list to prevent scanning hangs
-        BLACK_LIST = {".", "..", "system volume information", "$recycle.bin"}
+    def list_files_safely(
+        self,
+        share,
+        path="*",
+        depth=1,
+    ):
+        """
+        Perform bounded SMB file enumeration.
+
+        The scanner deliberately limits recursion to prevent excessive
+        enumeration and problematic Windows system directories.
+        """
+
+        if not self.conn:
+            return []
+
+        if depth < 0:
+            return []
+
+        collected = []
+
+        blacklist = {
+            ".",
+            "..",
+            "system volume information",
+            "$recycle.bin",
+        }
 
         try:
-            files = self.conn.listPath(share, path)
-            for f in files:
-                name = f.get_filename().strip()
-                if name.lower() in BLACK_LIST:
-                    continue
 
-                if f.is_directory():
+            entries = self.conn.listPath(
+                share,
+                path,
+            )
+
+        except Exception as exc:
+
+            logger.debug(
+                "SMB listing failed for %s/%s: %s",
+                share,
+                path,
+                exc,
+            )
+
+            return collected
+
+        for entry in entries:
+
+            try:
+
+                name = (
+                    entry
+                    .get_filename()
+                    .strip()
+                )
+
+            except Exception:
+                continue
+
+            if not name:
+                continue
+
+            if name.lower() in blacklist:
+                continue
+
+            try:
+
+                if entry.is_directory():
+
                     if depth > 0:
-                        # Construct path delimiters dynamically for the SMB tree
-                        sub_path = f"{path.strip('*')}{name}/*"
-                        collected += self.list_files_safely(share, sub_path, depth - 1)
+
+                        base_path = (
+                            path.rstrip("*")
+                        )
+
+                        if not base_path.endswith("\\"):
+                            base_path += "\\"
+
+                        sub_path = (
+                            f"{base_path}"
+                            f"{name}"
+                            f"\\*"
+                        )
+
+                        collected.extend(
+                            self.list_files_safely(
+                                share,
+                                sub_path,
+                                depth - 1,
+                            )
+                        )
+
                 else:
-                    collected.append(name)
-        except Exception as e:
-            logger.debug(f"Exception listing SMB share path '{share}/{path}': {e}")
+
+                    relative_path = (
+                        f"{path.rstrip('*').rstrip(chr(92))}"
+                        f"\\{name}"
+                    )
+
+                    collected.append(
+                        relative_path.strip("\\")
+                    )
+
+            except Exception as exc:
+
+                logger.debug(
+                    "SMB entry processing failed "
+                    "for %s/%s: %s",
+                    share,
+                    name,
+                    exc,
+                )
 
         return collected
 
-    # -----------------------------------------------------------------------
-    # Layer 6: Data Classification
-    # -----------------------------------------------------------------------
-    def classify_discovered_files(self, files):
-        """Examines found files for key operational assets and adjusts threat metrics."""
+    # ========================================================================
+    # Layer 6: File classification
+    # ========================================================================
+
+    def classify_discovered_files(
+        self,
+        files,
+    ):
+        """
+        Classify discovered filenames using conservative heuristics.
+
+        A filename match is treated as an indicator, not proof that
+        the underlying file contains sensitive information.
+        """
+
         categories = {
-            "credentials": [".env", "passwd", "shadow", "id_rsa", "unattend.xml", "web.config"],
-            "configs": [".conf", ".ini", ".cfg", "config", "settings.json"],
-            "databases": [".sql", ".db", ".sqlite", ".bak"],
-            "backups": [".zip", ".tar", ".gz", "backup"]
+
+            "credentials": [
+                ".env",
+                "passwd",
+                "shadow",
+                "id_rsa",
+                "unattend.xml",
+                "web.config",
+            ],
+
+            "configs": [
+                ".conf",
+                ".ini",
+                ".cfg",
+                "config",
+                "settings.json",
+            ],
+
+            "databases": [
+                ".sql",
+                ".db",
+                ".sqlite",
+                ".bak",
+            ],
+
+            "backups": [
+                ".zip",
+                ".tar",
+                ".gz",
+                "backup",
+            ],
         }
 
-        hits = {k: [] for k in categories}
-        for f in files:
-            for cat, keywords in categories.items():
-                if any(k in f.lower() for k in keywords):
-                    hits[cat].append(f)
+        hits = {
+            category: []
+            for category in categories
+        }
 
-        if hits["credentials"]:
-            self.add_score(40, "[CRITICAL] Highly sensitive credential documents found in share", 15)
-            self.result["impact"].append("plaintext passwords or encryption keys exposed within network files.")
-        if hits["databases"]:
-            self.add_score(30, "[CRITICAL] Operational databases leaked", 10)
-            self.result["impact"].append("Full exfiltration of local or system database containers.")
-        if hits["backups"]:
-            self.add_score(20, "[HIGH] Exposure of backup archives", 5)
-        if hits["configs"]:
-            self.add_score(20, "[HIGH] Application config details accessible", 5)
+        self.result[
+            "file_count"
+        ] = len(
+            files
+        )
 
-        self.result["classified_hits"] = hits
+        for file_path in files:
 
-    # -----------------------------------------------------------------------
-    # Final Metric Balancing & Attack Pathway Calculation
-    # -----------------------------------------------------------------------
-    def finalize_scoring_and_paths(self):
-        """Correlates access control state with credential strength to compile attack path chains."""
-        weak = self.result.get("weak_creds")
-        access = self.result.get("accessible_shares")
-        vulns = self.result.get("vulns", [])
+            lowered = file_path.lower()
 
-        # Step A: Update compound scoring rules
-        if weak and access:
-            self.add_score(40, "[CRITICAL] Confirmed credentials linked with uninhibited share drive access", 15)
-        elif weak:
-            self.add_score(15, "[MEDIUM] Credential validity checked with restricted network share privileges", 5)
+            for category, keywords in categories.items():
 
-        if self.result.get("anonymous") and access:
-            self.add_score(30, "[HIGH] Active anonymous access allowed on file shares", 10)
+                if any(
+                    keyword in lowered
+                    for keyword in keywords
+                ):
 
-        # Step B: Build realistic local attack chain
-        if any(v["severity"] in ["CRITICAL", "HIGH"] for v in vulns):
-            critical_vuln = next(v for v in vulns if v["severity"] in ["CRITICAL", "HIGH"])
-            self.result["attack_path"] = [
-                "Establish initial SMB protocol negotiation loop.",
-                f"Identify host vulnerabilities associated with {critical_vuln['title']}.",
-                f"Deploy remote shell agent utilizing Exploit-DB vulnerability (ID: {critical_vuln['id']})."
-            ]
-        elif access and self.result["classified_hits"].get("credentials"):
-            self.result["attack_path"] = [
-                "Map unauthenticated/weakly authenticated share endpoints.",
-                "Crawl shared directories, downloading localized target configuration files.",
-                "Extract system secrets to pivot or elevate privileges on target domains."
-            ]
-        elif access:
-            self.result["attack_path"] = [
-                "Connect to the active target network path via client driver.",
-                "Exfiltrate read-permissive proprietary documents from exposed directories."
-            ]
-        elif self.result["status"] == "OPEN":
-            self.result["attack_path"] = [
-                "Attempt to brute force local or active directory accounts.",
-                "Verify access controls across identified shares."
-            ]
+                    hits[
+                        category
+                    ].append(
+                        file_path
+                    )
 
-    # -----------------------------------------------------------------------
-    # Orchestrator
-    # -----------------------------------------------------------------------
-    def execute_scan(self):
-        """Runs the SMB scan sequence securely."""
-        start_time = time.time()
-        logger.info(f"Initiating security assessment on SMB target {self.target}:445")
+        self.result[
+            "classified_hits"
+        ] = hits
+
+        # ====================================================================
+        # Credential-bearing files
+        # ====================================================================
+
+        if hits[
+            "credentials"
+        ]:
+
+            self.add_finding(
+                title=(
+                    "Potential credential-bearing "
+                    "files exposed"
+                ),
+                severity="CRITICAL",
+                confidence="MEDIUM",
+                category="file_exposure",
+                evidence={
+                    "files": (
+                        hits[
+                            "credentials"
+                        ][:25]
+                    ),
+                    "classification": (
+                        "filename-based heuristic"
+                    ),
+                },
+                impact=(
+                    "Accessible credential-related files may expose "
+                    "passwords, secrets, private keys, or configuration "
+                    "credentials."
+                ),
+            )
+
+        # ====================================================================
+        # Database files
+        # ====================================================================
+
+        if hits[
+            "databases"
+        ]:
+
+            self.add_finding(
+                title=(
+                    "Potential database files exposed"
+                ),
+                severity="HIGH",
+                confidence="MEDIUM",
+                category="file_exposure",
+                evidence={
+                    "files": (
+                        hits[
+                            "databases"
+                        ][:25]
+                    ),
+                    "classification": (
+                        "filename-based heuristic"
+                    ),
+                },
+                impact=(
+                    "Accessible database files may contain sensitive "
+                    "application or operational data."
+                ),
+            )
+
+        # ====================================================================
+        # Backup archives
+        # ====================================================================
+
+        if hits[
+            "backups"
+        ]:
+
+            self.add_finding(
+                title=(
+                    "Potential backup archives exposed"
+                ),
+                severity="HIGH",
+                confidence="MEDIUM",
+                category="file_exposure",
+                evidence={
+                    "files": (
+                        hits[
+                            "backups"
+                        ][:25]
+                    ),
+                    "classification": (
+                        "filename-based heuristic"
+                    ),
+                },
+            )
+
+        # ====================================================================
+        # Configuration files
+        # ====================================================================
+
+        if hits[
+            "configs"
+        ]:
+
+            self.add_finding(
+                title=(
+                    "Potential configuration files exposed"
+                ),
+                severity="MEDIUM",
+                confidence="MEDIUM",
+                category="file_exposure",
+                evidence={
+                    "files": (
+                        hits[
+                            "configs"
+                        ][:25]
+                    ),
+                    "classification": (
+                        "filename-based heuristic"
+                    ),
+                },
+            )
+
+    # ========================================================================
+    # Connection cleanup
+    # ========================================================================
+
+    def close(
+        self,
+    ):
+        """
+        Safely close the SMB connection.
+        """
+
+        if not self.conn:
+            return
 
         try:
-            if not self.establish_connection():
-                return self.result
 
-            # Run Analysis Layers
-            self.analyze_protocol_properties()
-            self.audit_authentication()
+            self.conn.close()
 
-            # Share & File Auditing
-            shares = self.enumerate_shares()
-            accessible = self.analyze_share_access(shares)
+        except Exception as exc:
 
-            # Restrict exhaustive crawling: maximum 2 shares, depth of 1 level
-            discovered_files = []
-            for share in accessible[:2]:
-                files = self.list_files_safely(share, depth=1)
-                discovered_files.extend(files)
-
-            if discovered_files:
-                self.result["evidence"]["sample_files"] = discovered_files[:10]
-                self.classify_discovered_files(discovered_files)
-
-            # Compile Scoring and Paths
-            self.finalize_scoring_and_paths()
-
-        except Exception as e:
-            logger.critical(f"Panic error during SMB scanner runtime: {e}", exc_info=True)
-            self.result["findings"].append(f"[ERROR] Scan execution terminated: {str(e)}")
+            logger.debug(
+                "SMB connection cleanup failed: %s",
+                exc,
+            )
 
         finally:
-            # Safely close open sockets
-            if self.conn:
-                try:
-                    self.conn.close()
-                except Exception:
-                    pass
 
-        # Package scores and verdicts
-        self.normalize_score()
-        self.result["verdict"] = self.get_verdict()
-        self.result["scan_time"] = round(time.time() - start_time, 2)
+            self.conn = None
 
-        logger.info(f"SMB scan completed in {self.result['scan_time']}s. Rating: {self.result['verdict']}")
+    # ========================================================================
+    # Finalization
+    # ========================================================================
+
+    def _finalize(
+        self,
+        start_time,
+    ):
+        """
+        Finalize timing information.
+
+        Global risk scoring and attack-path generation intentionally
+        remain outside this module.
+        """
+
+        self.result[
+            "scan_time"
+        ] = round(
+            time.time()
+            - start_time,
+            2,
+        )
+
+        # --------------------------------------------------------------------
+        # Compatibility fields.
+        #
+        # The central risk engine owns these values.
+        # --------------------------------------------------------------------
+
+        self.result[
+            "score"
+        ] = 0
+
+        self.result[
+            "confidence"
+        ] = 0
+
+        self.result[
+            "verdict"
+        ] = ""
+
+        logger.info(
+            "SMB scan completed on %s in %.2fs",
+            self.target,
+            self.result[
+                "scan_time"
+            ],
+        )
+
         return self.result
 
-# ---------------------------------------------------------------------------
-# Standardized Interface function for main.py integration
-# ---------------------------------------------------------------------------
-def scan_smb(target, timeout=5):
-    scanner = SMBScanner(target, timeout=timeout)
+    # ========================================================================
+    # Orchestrator
+    # ========================================================================
+
+    def execute_scan(
+        self,
+    ):
+        """
+        Execute the SMB assessment in a controlled sequence.
+        """
+
+        start_time = time.time()
+
+        logger.info(
+            "Initiating SMB security assessment on %s:445",
+            self.target,
+        )
+
+        try:
+
+            # ================================================================
+            # Connection
+            # ================================================================
+
+            if not self.establish_connection():
+
+                return self._finalize(
+                    start_time
+                )
+
+            # ================================================================
+            # Protocol analysis
+            # ================================================================
+
+            self.analyze_protocol_properties()
+
+            # ================================================================
+            # Authentication
+            # ================================================================
+
+            self.audit_authentication()
+
+            # ================================================================
+            # Shares
+            # ================================================================
+
+            shares = self.enumerate_shares()
+
+            accessible = (
+                self.analyze_share_access(
+                    shares
+                )
+            )
+
+            # ================================================================
+            # Bounded file enumeration
+            # ================================================================
+
+            discovered_files = []
+
+            # Deliberately limit the number of shares crawled.
+            for share in accessible[:2]:
+
+                files = (
+                    self.list_files_safely(
+                        share,
+                        depth=1,
+                    )
+                )
+
+                discovered_files.extend(
+                    files
+                )
+
+            if discovered_files:
+
+                self.result[
+                    "evidence"
+                ][
+                    "sample_files"
+                ] = (
+                    discovered_files[:15]
+                )
+
+                self.add_finding(
+                    title=(
+                        "SMB file enumeration "
+                        "discovered "
+                        f"{len(discovered_files)} entries"
+                    ),
+                    severity="INFO",
+                    confidence="HIGH",
+                    category="enumeration",
+                    evidence={
+                        "file_count": len(
+                            discovered_files
+                        ),
+                        "sample_files": (
+                            discovered_files[:15]
+                        ),
+                    },
+                )
+
+                self.classify_discovered_files(
+                    discovered_files
+                )
+
+        except Exception as exc:
+
+            logger.critical(
+                "SMB scanner runtime failure: %s",
+                exc,
+                exc_info=True,
+            )
+
+            self.add_finding(
+                title=(
+                    "SMB scan terminated unexpectedly"
+                ),
+                severity="MEDIUM",
+                confidence="HIGH",
+                category="scanner_error",
+                evidence={
+                    "error": str(exc),
+                },
+            )
+
+        finally:
+
+            self.close()
+
+        return self._finalize(
+            start_time
+        )
+
+
+# ============================================================================
+# Standardized interface for main.py
+# ============================================================================
+
+def scan_smb(
+    target,
+    timeout=5,
+):
+    """
+    Standard PivotRaid SMB scanner interface.
+    """
+
+    scanner = SMBScanner(
+        target=target,
+        timeout=timeout,
+    )
+
     return scanner.execute_scan()
