@@ -1,35 +1,41 @@
 import argparse
-import time
 import logging
 import sys
+import time
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ftp import scan_ftp
 from smb import scan_smb
 from ssh import scan_ssh
+
 from vulnerabilities import query_from_fingerprint
+
+from risk_engine import assess_risk
+from correlation_engine import correlate_results
+
 from report import generate_html_report
 
 
-# ---------------------------------------------------------------------------
-# Setup Industrial Logging System
-# ---------------------------------------------------------------------------
+logger = logging.getLogger("PivotRaid.Main")
+
+
+# ============================================================================
+# Logging
+# ============================================================================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+        logging.StreamHandler(sys.stdout),
+    ],
 )
 
-logger = logging.getLogger("PivotRaid.Main")
 
-
-# ---------------------------------------------------------------------------
-# ASCII Art Banner
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Banner
+# ============================================================================
 
 def print_banner():
 
@@ -41,13 +47,19 @@ def print_banner():
  ░███░░░░░░   ░███  ░███  ░███ ░███ ░███  ░███     ░███░░░░░███   ███████  ░███ ░███ ░███
  ░███         ░███  ░░███ ███  ░███ ░███  ░███ ███ ░███    ░███  ███░░███  ░███ ░███ ░███
  █████        █████  ░░█████   ░░██████   ░░█████  █████   █████░░████████ █████░░████████
-░░░░░        ░░░░░    ░░░░░     ░░░░░  ░░░░░  ░░░░░   ░░░░░  ░░░░░  ░░░░░  ░░░░░░░░
+░░░░░        ░░░░░    ░░░░░     ░░░░░  ░░░░░  ░░░░░  ░░░░░  ░░░░░  ░░░░░  ░░░░░░░░
 """
 
-    print("\033[91m" + banner + "\033[0m")
+    print(
+        "\033[91m"
+        + banner
+        + "\033[0m"
+    )
 
     print(
-        "\033[1mPivotRaid - Lateral Movement & Exposure Engine\033[0m"
+        "\033[1m"
+        "PivotRaid - Lateral Movement & Exposure Engine"
+        "\033[0m"
     )
 
     print(
@@ -57,200 +69,274 @@ def print_banner():
     )
 
 
-# ---------------------------------------------------------------------------
-# Risk Helpers
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Vulnerability Enrichment
+# ============================================================================
 
-def calculate_vulnerability_risk(vulns):
+def _has_vulnerability_discovery_finding(
+    result,
+):
     """
-    Calculate service risk from normalized vulnerability results.
+    Determine whether the service already contains the standardized
+    vulnerability-discovery finding.
 
-    SearchSploit findings are treated as candidates. The score reflects
-    the severity of the returned candidate, not confirmed exploitability.
+    This makes enrichment idempotent.
     """
 
-    if not vulns:
-        return 0, 0, "INFO"
-
-    highest_score = 0
-
-    for vuln in vulns:
-
-        score = vuln.get(
-            "score",
-            0
-        )
-
-        if isinstance(score, (int, float)):
-            highest_score = max(
-                highest_score,
-                score
-            )
-
-    if highest_score >= 90:
-
-        verdict = "CRITICAL"
-
-    elif highest_score >= 75:
-
-        verdict = "HIGH"
-
-    elif highest_score >= 50:
-
-        verdict = "MEDIUM"
-
-    elif highest_score > 0:
-
-        verdict = "LOW"
-
-    else:
-
-        verdict = "INFO"
-
-    # Confidence is intentionally conservative.
-    #
-    # SearchSploit provides candidate exploit intelligence.
-    # It does not by itself prove that the target is vulnerable.
-
-    confidence = 35
-
-    return (
-        int(highest_score),
-        confidence,
-        verdict
+    findings = result.get(
+        "findings",
+        [],
     )
 
+    for finding in findings:
 
-# ---------------------------------------------------------------------------
-# Vulnerability Enrichment
-# ---------------------------------------------------------------------------
+        if not isinstance(
+            finding,
+            dict,
+        ):
+            continue
 
-def enrich_results_with_vulnerabilities(results):
+        if (
+            finding.get("category")
+            == "vulnerability_discovery"
+        ):
+
+            return True
+
+    return False
+
+
+def _add_vulnerability_discovery_finding(
+    result,
+    candidate_count,
+    source="Exploit-DB/SearchSploit",
+):
     """
-    Enrich scanner results using the vulnerability correlation engine.
+    Add one informational vulnerability-discovery observation.
 
-    Currently:
-        - SSH uses its structured fingerprint.
-        - SearchSploit is the sole vulnerability source.
+    This does NOT represent a vulnerability.
 
-    FTP/SMB results retain the vulnerability information already
-    produced by their scanners.
+    It only records that vulnerability intelligence returned
+    candidate records.
+    """
+
+    if _has_vulnerability_discovery_finding(
+        result
+    ):
+        return
+
+    result.setdefault(
+        "findings",
+        [],
+    )
+
+    result[
+        "findings"
+    ].append({
+
+        "title": (
+            "SearchSploit identified "
+            f"{candidate_count} vulnerability "
+            "candidate(s)"
+        ),
+
+        "severity": "INFO",
+
+        "confidence": "HIGH",
+
+        "category": (
+            "vulnerability_discovery"
+        ),
+
+        "evidence": {
+
+            "candidate_count": (
+                candidate_count
+            ),
+
+            "source": source,
+        },
+
+        "impact": (
+            "SearchSploit candidates indicate "
+            "potentially relevant exploit records. "
+            "They do not establish target "
+            "vulnerability or exploitability."
+        ),
+    })
+
+
+def enrich_results_with_vulnerabilities(
+    results,
+):
+    """
+    Enrich structured scanner results with vulnerability candidates.
+
+    Vulnerability discovery is delegated to vulnerabilities.py.
+
+    IMPORTANT DATA-MODEL RULE
+    -------------------------
+
+    Observed security conditions belong in:
+
+        result["findings"]
+
+    Vulnerability intelligence candidates belong in:
+
+        result["vulns"]
+
+    A SearchSploit candidate must NOT automatically become a
+    HIGH or CRITICAL finding.
+
+    This function does NOT:
+
+        - calculate risk
+        - determine exploitability
+        - confirm vulnerabilities
+        - generate attack paths
     """
 
     for result in results:
 
+        if not isinstance(
+            result,
+            dict,
+        ):
+            continue
+
         service_name = result.get(
-            "service"
+            "service",
+            "UNKNOWN",
         )
 
         if not isinstance(
             service_name,
-            str
+            str,
         ):
 
             logger.warning(
-                "Skipping result with invalid service "
-                f"identifier: {service_name!r}"
+                "Skipping result with invalid "
+                "service identifier: %r",
+                service_name,
             )
 
             continue
 
-        service_name = service_name.upper()
+        service_name = (
+            service_name
+            .upper()
+            .strip()
+        )
 
-        # ---------------------------------------------------------------
+        # ====================================================================
         # SSH
-        # ---------------------------------------------------------------
+        # ====================================================================
 
-        if service_name == "SSH":
+        if service_name != "SSH":
+            continue
 
-            fingerprint = result.get(
-                "ssh_fingerprint"
+        fingerprint = result.get(
+            "ssh_fingerprint"
+        )
+
+        if not fingerprint:
+
+            logger.debug(
+                "SSH result does not contain "
+                "a fingerprint; vulnerability "
+                "enrichment skipped."
             )
 
-            if not fingerprint:
+            continue
 
-                continue
+        try:
 
-            try:
-
-                ssh_vulns = query_from_fingerprint(
+            ssh_vulns = (
+                query_from_fingerprint(
                     fingerprint
                 )
+            )
 
-                if ssh_vulns:
-
-                    result["vulns"] = ssh_vulns
-
-                    score, confidence, verdict = (
-                        calculate_vulnerability_risk(
-                            ssh_vulns
-                        )
-                    )
-
-                    result["score"] = score
-                    result["confidence"] = confidence
-                    result["verdict"] = verdict
-
-                    result.setdefault(
-                        "findings",
-                        []
-                    )
-
-                    result["findings"].append(
-                        "[INFO] SearchSploit returned "
-                        f"{len(ssh_vulns)} "
-                        "HIGH/CRITICAL candidate(s)."
-                    )
-
-                    logger.info(
-                        "SSH vulnerability correlation "
-                        f"completed: {len(ssh_vulns)} "
-                        "candidate(s) identified."
-                    )
-
-                else:
-
-                    logger.info(
-                        "SearchSploit returned no "
-                        "HIGH/CRITICAL SSH candidates."
-                    )
-
-            except Exception as error:
+            if not isinstance(
+                ssh_vulns,
+                list,
+            ):
 
                 logger.warning(
-                    "SSH vulnerability correlation "
-                    f"failed: {error}",
-                    exc_info=True
+                    "SSH vulnerability lookup "
+                    "returned invalid type: %s",
+                    type(
+                        ssh_vulns
+                    ).__name__,
                 )
+
+                ssh_vulns = []
+
+            # ---------------------------------------------------------------
+            # Replace candidates rather than blindly extending them.
+            #
+            # This prevents duplicate vulnerability records if enrichment
+            # is accidentally invoked more than once.
+            # ---------------------------------------------------------------
+
+            result[
+                "vulns"
+            ] = ssh_vulns
+
+            if ssh_vulns:
+
+                _add_vulnerability_discovery_finding(
+                    result=result,
+                    candidate_count=len(
+                        ssh_vulns
+                    ),
+                )
+
+                logger.info(
+                    "SSH vulnerability enrichment "
+                    "completed: %d candidate(s)",
+                    len(
+                        ssh_vulns
+                    ),
+                )
+
+            else:
+
+                logger.info(
+                    "No SearchSploit candidates "
+                    "identified for SSH."
+                )
+
+        except Exception as error:
+
+            logger.warning(
+                "SSH vulnerability enrichment failed: %s",
+                error,
+                exc_info=True,
+            )
 
     return results
 
 
-# ---------------------------------------------------------------------------
-# Structured Results Printer
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Structured Result Printer
+# ============================================================================
 
-def print_result(result):
-    """Print a standardized summary of a service scan."""
+def print_result(
+    result,
+):
+    """
+    Print one normalized service result.
+    """
 
     service = result.get(
         "service",
-        "UNKNOWN"
+        "UNKNOWN",
     )
 
     status = result.get(
         "status",
-        "CLOSED"
-    )
-
-    score = result.get(
-        "score",
-        0
-    )
-
-    verdict = result.get(
-        "verdict",
-        "UNKNOWN"
+        "UNKNOWN",
     )
 
     print(
@@ -258,41 +344,80 @@ def print_result(result):
         f"(Port {result.get('port')}) -> {status}"
     )
 
-    print(
-        f"    Risk Severity : "
-        f"{verdict} ({score}/100)"
+    # ========================================================================
+    # Findings
+    # ========================================================================
+
+    findings = result.get(
+        "findings",
+        [],
     )
 
-    print(
-        f"    Confidence    : "
-        f"{result.get('confidence', 0)}/100"
-    )
-
-    print(
-        f"    Scan Duration : "
-        f"{result.get('scan_time', 0)}s"
-    )
-
-    if result.get("findings"):
-
-        print("    Findings:")
-
-        for finding in result["findings"]:
-
-            print(
-                f"      - {finding}"
-            )
-
-    if result.get("vulns"):
+    if findings:
 
         print(
-            "    Identified Vulnerabilities:"
+            "    Findings:"
         )
 
-        for vulnerability in result["vulns"]:
+        for finding in findings:
+
+            if isinstance(
+                finding,
+                dict,
+            ):
+
+                severity = finding.get(
+                    "severity",
+                    "INFO",
+                )
+
+                confidence = finding.get(
+                    "confidence",
+                    "LOW",
+                )
+
+                title = finding.get(
+                    "title",
+                    "Unnamed finding",
+                )
+
+                print(
+                    f"      - [{severity}] "
+                    f"{title} "
+                    f"(Confidence: {confidence})"
+                )
+
+            else:
+
+                print(
+                    f"      - {finding}"
+                )
+
+    # ========================================================================
+    # Vulnerability candidates
+    # ========================================================================
+
+    vulnerabilities = result.get(
+        "vulns",
+        [],
+    )
+
+    if vulnerabilities:
+
+        print(
+            "    Vulnerability Candidates:"
+        )
+
+        for vulnerability in vulnerabilities:
+
+            if not isinstance(
+                vulnerability,
+                dict,
+            ):
+                continue
 
             print(
-                f"      [*] "
+                "      [*] "
                 f"{vulnerability.get('title', 'Unknown')} "
                 f"(Severity: "
                 f"{vulnerability.get('severity', 'UNKNOWN')}) "
@@ -300,242 +425,390 @@ def print_result(result):
                 f"{vulnerability.get('id', 'N/A')}"
             )
 
-    if result.get("attack_path"):
+
+# ============================================================================
+# Risk Summary Printer
+# ============================================================================
+
+def print_risk_summary(
+    risk,
+):
+    """
+    Print the target-level risk assessment.
+    """
+
+    if not risk:
+        return
+
+    print(
+        "\n"
+        + "=" * 80
+    )
+
+    print(
+        "TARGET RISK ASSESSMENT"
+    )
+
+    print(
+        "=" * 80
+    )
+
+    print(
+        f"Risk Score    : "
+        f"{risk.get('score', 0)}/100"
+    )
+
+    print(
+        f"Severity      : "
+        f"{risk.get('severity', 'INFO')}"
+    )
+
+    print(
+        f"Confidence    : "
+        f"{risk.get('confidence', 'LOW')}"
+    )
+
+    print(
+        f"Findings      : "
+        f"{risk.get('finding_count', 0)}"
+    )
+
+    print(
+        f"Services      : "
+        f"{risk.get('service_count', 0)}"
+    )
+
+    print(
+        f"Confirmed Vulns: "
+        f"{risk.get('confirmed_vulnerabilities', 0)}"
+    )
+
+    print(
+        f"Vuln Candidates: "
+        f"{risk.get('vulnerability_candidates', 0)}"
+    )
+
+    verdict = risk.get(
+        "verdict"
+    )
+
+    if verdict:
 
         print(
-            "    Local Path Projection:"
+            "\nVerdict:\n"
+            f"  {verdict}"
         )
 
-        for index, step in enumerate(
-            result["attack_path"],
-            1
-        ):
+    # ========================================================================
+    # Risk factors
+    # ========================================================================
+
+    factors = risk.get(
+        "risk_factors",
+        [],
+    )
+
+    if factors:
+
+        print(
+            "\nRisk Factors:"
+        )
+
+        for factor in factors:
+
+            if not isinstance(
+                factor,
+                dict,
+            ):
+                continue
 
             print(
-                f"      {index}. {step}"
+                "  → "
+                f"[{factor.get('severity', 'INFO')}] "
+                f"{factor.get('title', 'Unknown')} "
+                f"({factor.get('contribution', 0)} points)"
             )
 
 
-# ---------------------------------------------------------------------------
-# Cross-Service Threat Correlation Engine
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Correlation Summary Printer
+# ============================================================================
 
-def correlate_intelligence(results):
+def print_correlation_summary(
+    correlation,
+):
     """
-    Acts as the brain of PivotRaid.
-
-    At this stage vulnerability enrichment has already happened.
-    This function therefore focuses on cross-service correlation
-    and attack-path construction.
+    Print cross-service relationships and potential exposure paths.
     """
 
-    intel = {
-        "credentials": [],
-        "vulns": [],
-        "services": {},
-        "attack_paths": []
-    }
+    if not correlation:
+        return
 
-    # -----------------------------------------------------------------------
-    # Register services and vulnerabilities
-    # -----------------------------------------------------------------------
+    print(
+        "\n"
+        + "=" * 80
+    )
 
-    for result in results:
+    print(
+        "CROSS-SERVICE CORRELATION"
+    )
 
-        service_name = result.get(
-            "service"
+    print(
+        "=" * 80
+    )
+
+    # ========================================================================
+    # Relationships
+    # ========================================================================
+
+    relationships = correlation.get(
+        "relationships",
+        [],
+    )
+
+    if relationships:
+
+        print(
+            "\nRelationships:"
+        )
+
+        for relationship in relationships:
+
+            if not isinstance(
+                relationship,
+                dict,
+            ):
+                continue
+
+            print(
+                "  → "
+                f"{relationship.get('source')} "
+                "-> "
+                f"{relationship.get('destination')} "
+                f"[{relationship.get('severity')}] "
+                f"{relationship.get('relationship')}"
+            )
+
+    else:
+
+        print(
+            "\nRelationships:\n"
+            "  → None identified."
+        )
+
+    # ========================================================================
+    # Potential exposure paths
+    # ========================================================================
+
+    paths = correlation.get(
+        "attack_paths",
+        [],
+    )
+
+    if paths:
+
+        print(
+            "\nPotential Exposure Paths:"
+        )
+
+        for index, path in enumerate(
+            paths,
+            1,
+        ):
+
+            if not isinstance(
+                path,
+                dict,
+            ):
+                continue
+
+            print(
+                f"\n  {index}. "
+                f"{path.get('name', 'Unnamed path')}"
+            )
+
+            print(
+                f"     Severity   : "
+                f"{path.get('severity', 'INFO')}"
+            )
+
+            print(
+                f"     Confidence : "
+                f"{path.get('confidence', 'LOW')}"
+            )
+
+            rationale = path.get(
+                "rationale"
+            )
+
+            if rationale:
+
+                print(
+                    f"     Rationale  : "
+                    f"{rationale}"
+                )
+
+            steps = path.get(
+                "steps",
+                [],
+            )
+
+            for step_index, step in enumerate(
+                steps,
+                1,
+            ):
+
+                if not isinstance(
+                    step,
+                    dict,
+                ):
+                    continue
+
+                service = step.get(
+                    "service",
+                    "UNKNOWN",
+                )
+
+                observation = step.get(
+                    "observation",
+                    "",
+                )
+
+                print(
+                    f"       {step_index}. "
+                    f"[{service}] "
+                    f"{observation}"
+                )
+
+    else:
+
+        print(
+            "\nPotential Exposure Paths:\n"
+            "  → None identified."
+        )
+
+
+# ============================================================================
+# Thread-Safe Scanner Wrapper
+# ============================================================================
+
+def run_scan_safe(
+    scanner,
+    target,
+    timeout,
+):
+    """
+    Execute a scanner inside an isolated execution boundary.
+
+    A scanner failure does not terminate the entire assessment.
+    """
+
+    service_name = (
+        scanner.__name__
+        .replace(
+            "scan_",
+            "",
+        )
+        .upper()
+    )
+
+    try:
+
+        logger.debug(
+            "Launching %s scanner",
+            service_name,
+        )
+
+        result = scanner(
+            target,
+            timeout=timeout,
         )
 
         if not isinstance(
+            result,
+            dict,
+        ):
+
+            raise TypeError(
+                f"{service_name} scanner returned "
+                f"{type(result).__name__}, expected dict"
+            )
+
+        return result
+
+    except Exception as error:
+
+        logger.error(
+            "Scanner failure in %s: %s",
             service_name,
-            str
-        ):
-
-            logger.warning(
-                "Ignoring scanner result with invalid "
-                f"service identifier: {service_name!r}"
-            )
-
-            continue
-
-        service_name = service_name.upper()
-
-        intel["services"][
-            service_name
-        ] = result
-
-        # ---------------------------------------------------------------
-        # Credentials
-        # ---------------------------------------------------------------
-
-        if result.get(
-            "weak_creds"
-        ):
-
-            intel["credentials"].append(
-                (
-                    service_name,
-                    result["weak_creds"]
-                )
-            )
-
-        # ---------------------------------------------------------------
-        # Vulnerabilities
-        # ---------------------------------------------------------------
-
-        if result.get(
-            "vulns"
-        ):
-
-            intel["vulns"].extend(
-                result["vulns"]
-            )
-
-    # -----------------------------------------------------------------------
-    # Service references
-    # -----------------------------------------------------------------------
-
-    ftp = intel["services"].get(
-        "FTP",
-        {}
-    )
-
-    smb = intel["services"].get(
-        "SMB",
-        {}
-    )
-
-    ssh = intel["services"].get(
-        "SSH",
-        {}
-    )
-
-    # -----------------------------------------------------------------------
-    # Correlation Node A: Credential Harvesting & Reuse
-    # -----------------------------------------------------------------------
-
-    if intel["credentials"]:
-
-        creds_str = ", ".join(
-            [
-                f"{service}({pair})"
-                for service, pair
-                in intel["credentials"]
-            ]
+            error,
+            exc_info=True,
         )
 
-        intel["attack_paths"].append(
-            "Credential Harvesting: "
-            f"Reuse discovered credentials "
-            f"[{creds_str}] across other "
-            "infrastructure hosts."
-        )
+        return {
 
-    # -----------------------------------------------------------------------
-    # Correlation Node B: FTP Data Leaks to SMB Pivot
-    # -----------------------------------------------------------------------
+            "service": service_name,
 
-    ftp_has_creds = (
-        ftp
-        .get("classified_hits", {})
-        .get("credentials")
-    )
+            "port": 0,
 
-    if (
-        ftp_has_creds
-        and smb.get("status") == "OPEN"
-    ):
+            "status": "CRASHED",
 
-        intel["attack_paths"].append(
-            "FTP to SMB Lateral Pivot: "
-            "Extract hardcoded configuration keys "
-            "from FTP files -> Use credentials to "
-            "access SMB Admin shares."
-        )
+            "findings": [
 
-    # -----------------------------------------------------------------------
-    # Correlation Node C: Direct Remote Exploitation
-    # -----------------------------------------------------------------------
+                {
+                    "title": (
+                        f"{service_name} scanner "
+                        "terminated unexpectedly"
+                    ),
 
-    high_vulns = [
-        vulnerability
-        for vulnerability in intel["vulns"]
-        if vulnerability.get("severity")
-        in [
-            "CRITICAL",
-            "HIGH"
-        ]
-    ]
+                    "severity": "MEDIUM",
 
-    if high_vulns:
+                    "confidence": "HIGH",
 
-        for vulnerability in high_vulns:
+                    "category": "scanner_error",
 
-            intel["attack_paths"].append(
-                "Direct Host Exploitation: "
-                f"Leverage Exploit-DB candidate "
-                f"(EDB-ID: {vulnerability.get('id')}) "
-                "associated with an exposed service."
-            )
+                    "evidence": {
+                        "error": str(error),
+                    },
 
-    # -----------------------------------------------------------------------
-    # Correlation Node D: Write Access Manipulation
-    # -----------------------------------------------------------------------
+                    "impact": (
+                        "The service could not be assessed "
+                        "normally."
+                    ),
+                }
+            ],
 
-    if (
-        ftp.get("writable")
-        and smb.get("status") == "OPEN"
-    ):
+            "impact": [],
 
-        intel["attack_paths"].append(
-            "Payload Drop Pivot: "
-            "Upload persistent payload "
-            "via FTP write permissions -> "
-            "Trigger execution or capture "
-            "domain credentials."
-        )
+            "vulns": [],
 
-    # -----------------------------------------------------------------------
-    # SSH metadata
-    # -----------------------------------------------------------------------
+            "score": 0,
 
-    if ssh:
+            "confidence": 0,
 
-        ssh_fingerprint = ssh.get(
-            "ssh_fingerprint",
-            {}
-        )
+            "verdict": "UNKNOWN",
 
-        identification = ssh_fingerprint.get(
-            "identification",
-            {}
-        )
-
-        if identification.get(
-            "software"
-        ):
-
-            logger.info(
-                "SSH fingerprint correlated: "
-                f"{identification.get('software')} "
-                f"{identification.get('version', '')}"
-            )
-
-    return intel
+            "scan_time": 0,
+        }
 
 
-# ---------------------------------------------------------------------------
-# Assessment Summarizer
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Executive Summary
+# ============================================================================
 
 def display_summary(
     results,
-    total_time
+    risk,
+    correlation,
+    total_time,
 ):
-    """Display the executive security summary."""
+    """
+    Display the final executive security summary.
+    """
 
     print(
-        "\n" + "=" * 80
+        "\n"
+        + "=" * 80
     )
 
     print(
@@ -546,166 +819,83 @@ def display_summary(
         "=" * 80
     )
 
-    results_sorted = sorted(
-        results,
-        key=lambda result: result.get(
-            "score",
-            0
-        ),
-        reverse=True
-    )
+    # ========================================================================
+    # Target risk
+    # ========================================================================
 
-    for result in results_sorted:
+    if risk:
 
         print(
-            f" - {result.get('service')}: "
-            f"{result.get('verdict')} "
-            f"(Score: {result.get('score')}/100)"
+            f"\nTarget Risk: "
+            f"{risk.get('severity', 'INFO')} "
+            f"({risk.get('score', 0)}/100)"
         )
-
-    if results_sorted:
-
-        top = results_sorted[0]
 
         print(
-            f"\n[!] Critical Action Item: "
-            f"Focus triage efforts on "
-            f"{top.get('service')} "
-            f"(Risk Score: "
-            f"{top.get('score')}/100)"
+            f"Assessment Confidence: "
+            f"{risk.get('confidence', 'LOW')}"
         )
 
-    intel = correlate_intelligence(
-        results
-    )
-
-    # -----------------------------------------------------------------------
-    # Vulnerability Correlation
-    # -----------------------------------------------------------------------
+    # ========================================================================
+    # Services
+    # ========================================================================
 
     print(
-        "\n[★] Vulnerability Correlation:"
+        "\nServices Assessed:"
     )
 
-    if intel["vulns"]:
-
-        for vulnerability in intel["vulns"]:
-
-            print(
-                f"  → [{vulnerability.get('severity')}] "
-                f"{vulnerability.get('title')} "
-                f"(EDB-ID: "
-                f"{vulnerability.get('id')})"
-            )
-
-    else:
+    for result in results:
 
         print(
-            "  → No HIGH/CRITICAL "
-            "SearchSploit candidates correlated."
+            f"  - "
+            f"{result.get('service', 'UNKNOWN')}: "
+            f"{result.get('status', 'UNKNOWN')}"
         )
 
-    # -----------------------------------------------------------------------
-    # Attack Paths
-    # -----------------------------------------------------------------------
+    # ========================================================================
+    # Correlation
+    # ========================================================================
 
-    print(
-        "\n[★] Projected Attack Chains "
-        "& Lateral Paths:"
-    )
+    if correlation:
 
-    if intel["attack_paths"]:
-
-        for path in intel["attack_paths"]:
-
-            print(
-                f"  → {path}"
+        relationship_count = len(
+            correlation.get(
+                "relationships",
+                [],
             )
+        )
 
-    else:
+        path_count = len(
+            correlation.get(
+                "attack_paths",
+                [],
+            )
+        )
 
         print(
-            "  → No direct cross-service "
-            "compromise chains projected."
+            f"\nCross-Service Relationships: "
+            f"{relationship_count}"
+        )
+
+        print(
+            f"Potential Exposure Paths: "
+            f"{path_count}"
         )
 
     print(
         f"\nScan Statistics: "
         f"{len(results)} services assessed "
-        f"in {round(total_time, 2)} seconds.\n"
+        f"in {round(total_time, 2)} seconds."
+    )
+
+    print(
+        "=" * 80
     )
 
 
-# ---------------------------------------------------------------------------
-# Thread-Safe Scan Coordinator
-# ---------------------------------------------------------------------------
-
-def run_scan_safe(
-    scanner,
-    target,
-    timeout
-):
-    """
-    Execute a scanner inside an isolated execution boundary.
-    """
-
-    service_name = (
-        scanner.__name__
-        .replace(
-            "scan_",
-            ""
-        )
-        .upper()
-    )
-
-    try:
-
-        logger.debug(
-            f"Launching thread for "
-            f"{service_name} scanner..."
-        )
-
-        result = scanner(
-            target,
-            timeout=timeout
-        )
-
-        return result
-
-    except Exception as error:
-
-        logger.error(
-            f"Thread runtime crash in "
-            f"{service_name} scanner: {error}",
-            exc_info=True
-        )
-
-        return {
-            "service": service_name,
-            "port": 0,
-            "status": "CRASHED",
-
-            "findings": [
-                f"Scanner Exception: {str(error)}"
-            ],
-
-            "impact": [],
-
-            "score": 0,
-
-            "confidence": 0,
-
-            "verdict": "UNKNOWN",
-
-            "scan_time": 0,
-
-            "vulns": []
-        }
-
-
-# ---------------------------------------------------------------------------
-# Main Execution Entrypoint
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Main
+# ============================================================================
 
 def main():
 
@@ -713,11 +903,11 @@ def main():
         description=(
             "PivotRaid - Automated Lateral "
             "Movement & Service Exposure "
-            "Core Engines."
+            "Assessment Engine."
         ),
         formatter_class=(
             argparse.ArgumentDefaultsHelpFormatter
-        )
+        ),
     )
 
     parser.add_argument(
@@ -727,7 +917,7 @@ def main():
         help=(
             "IP address or hostname "
             "of target system"
-        )
+        ),
     )
 
     parser.add_argument(
@@ -735,30 +925,34 @@ def main():
         type=int,
         default=5,
         help=(
-            "Network connection timeout limits"
-        )
+            "Network connection timeout"
+        ),
     )
 
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="Enable debugging log outputs"
+        help=(
+            "Enable debugging log output"
+        ),
     )
 
     args = parser.parse_args()
 
     target = args.target
 
-    # -----------------------------------------------------------------------
+    # ========================================================================
     # Logging
-    # -----------------------------------------------------------------------
+    # ========================================================================
+
+    pivotraid_logger = logging.getLogger(
+        "PivotRaid"
+    )
 
     if args.verbose:
 
-        logging.getLogger(
-            "PivotRaid"
-        ).setLevel(
+        pivotraid_logger.setLevel(
             logging.DEBUG
         )
 
@@ -768,50 +962,50 @@ def main():
 
     else:
 
-        logging.getLogger(
-            "PivotRaid"
-        ).setLevel(
+        pivotraid_logger.setLevel(
             logging.INFO
         )
 
-    # -----------------------------------------------------------------------
-    # Start Scan
-    # -----------------------------------------------------------------------
+    # ========================================================================
+    # Start
+    # ========================================================================
 
     print_banner()
 
     logger.info(
-        f"Target system locked: {target}"
+        "Target system locked: %s",
+        target,
     )
 
     start_time = time.time()
 
     results = []
 
-    # -----------------------------------------------------------------------
+    # ========================================================================
     # Scanner Registry
-    # -----------------------------------------------------------------------
+    # ========================================================================
 
     scanners = [
         scan_ftp,
         scan_smb,
-        scan_ssh
+        scan_ssh,
     ]
 
-    # -----------------------------------------------------------------------
-    # Concurrent Scanner Execution
-    # -----------------------------------------------------------------------
+    # ========================================================================
+    # Concurrent Scanning
+    # ========================================================================
 
     with ThreadPoolExecutor(
         max_workers=len(scanners)
     ) as executor:
 
         futures_map = {
+
             executor.submit(
                 run_scan_safe,
                 scanner,
                 target,
-                args.timeout
+                args.timeout,
             ): scanner
 
             for scanner in scanners
@@ -823,24 +1017,47 @@ def main():
 
             result = future.result()
 
-            results.append(
-                result
-            )
+            if result:
 
-    # -----------------------------------------------------------------------
-    # Vulnerability Enrichment
-    #
-    # This now happens BEFORE print_result(), so SSH's SearchSploit
-    # findings and calculated risk are visible in the normal service output.
-    # -----------------------------------------------------------------------
+                results.append(
+                    result
+                )
 
-    results = enrich_results_with_vulnerabilities(
-        results
+    # ========================================================================
+    # Stable output ordering
+    # ========================================================================
+
+    service_order = {
+        "FTP": 1,
+        "SMB": 2,
+        "SSH": 3,
+    }
+
+    results.sort(
+        key=lambda result: service_order.get(
+            str(
+                result.get(
+                    "service",
+                    "",
+                )
+            ).upper(),
+            99,
+        )
     )
 
-    # -----------------------------------------------------------------------
-    # Print Final Enriched Results
-    # -----------------------------------------------------------------------
+    # ========================================================================
+    # Vulnerability Enrichment
+    # ========================================================================
+
+    results = (
+        enrich_results_with_vulnerabilities(
+            results
+        )
+    )
+
+    # ========================================================================
+    # Print individual service results
+    # ========================================================================
 
     for result in results:
 
@@ -848,43 +1065,135 @@ def main():
             result
         )
 
-    total_time = (
-        time.time()
-        - start_time
-    )
-
-    # -----------------------------------------------------------------------
-    # Executive Summary
-    # -----------------------------------------------------------------------
-
-    display_summary(
-        results,
-        total_time
-    )
-
-    # -----------------------------------------------------------------------
-    # HTML Report
-    # -----------------------------------------------------------------------
+    # ========================================================================
+    # Central Risk Engine
+    # ========================================================================
 
     try:
 
-        generate_html_report(
-            results,
-            target
+        risk = assess_risk(
+            results
         )
 
     except Exception as error:
 
         logger.error(
-            "Failed to compile the final "
-            f"HTML report: {error}",
-            exc_info=True
+            "Risk engine failure: %s",
+            error,
+            exc_info=True,
+        )
+
+        risk = {
+
+            "score": 0,
+
+            "severity": "UNKNOWN",
+
+            "confidence": "LOW",
+
+            "verdict": (
+                "Risk assessment failed."
+            ),
+
+            "finding_count": 0,
+
+            "service_count": len(
+                results
+            ),
+
+            "confirmed_vulnerabilities": 0,
+
+            "vulnerability_candidates": 0,
+
+            "risk_factors": [],
+
+            "services": {},
+        }
+
+    # ========================================================================
+    # Correlation Engine
+    # ========================================================================
+
+    try:
+
+        correlation = correlate_results(
+            results
+        )
+
+    except Exception as error:
+
+        logger.error(
+            "Correlation engine failure: %s",
+            error,
+            exc_info=True,
+        )
+
+        correlation = {
+
+            "relationships": [],
+
+            "attack_paths": [],
+        }
+
+    # ========================================================================
+    # Central intelligence output
+    # ========================================================================
+
+    print_risk_summary(
+        risk
+    )
+
+    print_correlation_summary(
+        correlation
+    )
+
+    # ========================================================================
+    # Timing
+    # ========================================================================
+
+    total_time = (
+        time.time()
+        - start_time
+    )
+
+    # ========================================================================
+    # Executive Summary
+    # ========================================================================
+
+    display_summary(
+        results=results,
+        risk=risk,
+        correlation=correlation,
+        total_time=total_time,
+    )
+
+    # ========================================================================
+    # HTML Report
+    # ========================================================================
+
+    try:
+
+        generate_html_report(
+            results,
+            target,
+        )
+
+        logger.info(
+            "HTML report generated successfully."
+        )
+
+    except Exception as error:
+
+        logger.error(
+            "Failed to compile final HTML report: %s",
+            error,
+            exc_info=True,
         )
 
 
-# ---------------------------------------------------------------------------
-# Program Entry Point
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Entry Point
+# ============================================================================
 
 if __name__ == "__main__":
 
@@ -895,8 +1204,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print(
-            "\n\n[!] Execution interrupted "
-            "by operator. Exiting."
+            "\n\n"
+            "[!] Execution interrupted by operator. "
+            "Exiting."
         )
 
         sys.exit(1)
