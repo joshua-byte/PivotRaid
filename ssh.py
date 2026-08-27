@@ -1,41 +1,51 @@
 import json
 import re
 import socket
+import time
+import logging
 
 
-# ============================================================
+logger = logging.getLogger("PivotRaid.SSH")
+
+
+# ============================================================================
 # 1. RAW SSH BANNER
-# ============================================================
+# ============================================================================
 
-def get_ssh_banner(host, port=22, timeout=5):
+def get_ssh_banner(
+    host,
+    port=22,
+    timeout=5,
+):
     """
-    Collect the SSH identification banner directly from
-    the TCP socket.
+    Collect the SSH identification banner directly from TCP.
 
     No authentication is performed.
     No username is required.
-    No SSH cryptographic negotiation is required.
-
-    Example:
-
-        SSH-2.0-OpenSSH_4.7p1 Debian-8ubuntu1
+    No cryptographic negotiation is performed.
     """
 
     sock = None
+    start_time = time.time()
 
     try:
+
         sock = socket.create_connection(
             (host, port),
-            timeout=timeout
+            timeout=timeout,
         )
 
-        sock.settimeout(timeout)
+        sock.settimeout(
+            timeout
+        )
 
         data = b""
 
         while len(data) < 4096:
 
-            chunk = sock.recv(1024)
+            chunk = sock.recv(
+                1024
+            )
 
             if not chunk:
                 break
@@ -46,24 +56,42 @@ def get_ssh_banner(host, port=22, timeout=5):
                 break
 
         # SSH servers may send pre-banner lines.
-        # We specifically look for the SSH identification line.
+        # Find the actual SSH identification line.
+
         for line in data.splitlines():
 
             line = line.strip()
 
             if line.startswith(b"SSH-"):
 
-                return line.decode(
+                banner = line.decode(
                     "utf-8",
-                    errors="replace"
+                    errors="replace",
                 )
+
+                logger.debug(
+                    "SSH banner collected from %s:%s in %.2fs",
+                    host,
+                    port,
+                    time.time() - start_time,
+                )
+
+                return banner
 
         return None
 
     except (
         socket.timeout,
-        OSError
-    ):
+        OSError,
+    ) as exc:
+
+        logger.debug(
+            "SSH banner collection failed for %s:%s - %s",
+            host,
+            port,
+            exc,
+        )
+
         return None
 
     finally:
@@ -77,136 +105,159 @@ def get_ssh_banner(host, port=22, timeout=5):
                 pass
 
 
-# ============================================================
+# ============================================================================
 # 2. SSH SERVER INFORMATION
-# ============================================================
+# ============================================================================
 
-def get_ssh_server_info(banner):
+def get_ssh_server_info(
+    banner,
+):
     """
-    Parse the SSH identification banner.
+    Parse an SSH identification banner.
 
-    Produces structured information that can be passed
-    to the correlation/SearchSploit engine.
+    Example:
+
+        SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0
+
+    becomes approximately:
+
+        protocol = 2.0
+        software = OpenSSH
+        version = 8.9p1
+        platform = Ubuntu
     """
 
     server_info = {
+
         "raw_banner": banner,
+
         "protocol": None,
+
         "software": None,
+
         "version": None,
+
         "platform": None,
-        "platform_version": None
+
+        "platform_version": None,
     }
 
     if not banner:
         return server_info
 
-    # ========================================================
-    # Protocol Version
-    # ========================================================
+    # ========================================================================
+    # Protocol
+    # ========================================================================
 
     protocol_match = re.search(
         r"^SSH-([0-9.]+)-",
-        banner
+        banner,
     )
 
     if protocol_match:
 
-        server_info["protocol"] = (
-            protocol_match.group(1)
+        server_info[
+            "protocol"
+        ] = protocol_match.group(
+            1
         )
 
-    # ========================================================
+    # ========================================================================
     # Software / Implementation
-    # ========================================================
+    # ========================================================================
 
     software_match = re.search(
         r"^SSH-[0-9.]+-([^ ]+)",
-        banner
+        banner,
     )
 
     if software_match:
 
         software_string = (
-            software_match.group(1)
+            software_match.group(
+                1
+            )
         )
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
         # OpenSSH
-        #
-        # Examples:
-        #
-        # OpenSSH_4.7p1
-        # OpenSSH_8.9p1
-        # OpenSSH-9.6p1
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
 
         openssh_match = re.match(
             r"(OpenSSH)[_-]([0-9][A-Za-z0-9._-]*)",
-            software_string
+            software_string,
         )
 
         if openssh_match:
 
-            server_info["software"] = (
-                openssh_match.group(1)
+            server_info[
+                "software"
+            ] = openssh_match.group(
+                1
             )
 
-            server_info["version"] = (
-                openssh_match.group(2)
+            server_info[
+                "version"
+            ] = openssh_match.group(
+                2
             )
 
         else:
 
             # Generic SSH implementation
-            server_info["software"] = (
-                software_string
-            )
 
-    # ========================================================
+            server_info[
+                "software"
+            ] = software_string
+
+    # ========================================================================
     # Platform / Distribution
-    # ========================================================
+    # ========================================================================
 
     banner_lower = banner.lower()
 
     platform_patterns = {
+
         "Ubuntu": r"ubuntu",
+
         "Debian": r"debian",
+
         "CentOS": r"centos",
+
         "RHEL": r"rhel",
+
         "Fedora": r"fedora",
+
         "FreeBSD": r"freebsd",
+
         "OpenBSD": r"openbsd",
-        "NetBSD": r"netbsd"
+
+        "NetBSD": r"netbsd",
     }
 
-    for platform, pattern in platform_patterns.items():
+    for (
+        platform,
+        pattern,
+    ) in platform_patterns.items():
 
         if re.search(
             pattern,
-            banner_lower
+            banner_lower,
         ):
 
-            server_info["platform"] = platform
+            server_info[
+                "platform"
+            ] = platform
 
             break
 
-    # ========================================================
-    # Platform Version / Distribution Suffix
-    # ========================================================
-    #
-    # Example:
-    #
-    # SSH-2.0-OpenSSH_4.7p1 Debian-8ubuntu1
-    #
-    # platform      = Debian
-    # platform_version = 8ubuntu1
-    #
-    # We only extract what is explicitly present in the banner.
-    # We do not infer an operating-system version.
-    # ========================================================
+    # ========================================================================
+    # Platform Version
+    # ========================================================================
 
-    if server_info["platform"]:
+    if server_info[
+        "platform"
+    ]:
 
         platform = server_info[
             "platform"
@@ -215,113 +266,136 @@ def get_ssh_server_info(banner):
         platform_version_match = re.search(
             rf"{re.escape(platform)}[-_/]([A-Za-z0-9._-]+)",
             banner,
-            re.IGNORECASE
+            re.IGNORECASE,
         )
 
         if platform_version_match:
 
-            server_info["platform_version"] = (
-                platform_version_match.group(1)
+            server_info[
+                "platform_version"
+            ] = (
+                platform_version_match.group(
+                    1
+                )
             )
 
     return server_info
 
 
-# ============================================================
+# ============================================================================
 # 3. SSH FINGERPRINT
-# ============================================================
+# ============================================================================
 
 def collect_ssh_fingerprint(
     host,
-    port,
+    port=22,
     server_info=None,
-    authentication=None
+    authentication=None,
 ):
     """
     Build the canonical SSH evidence structure.
 
-    This function performs no authentication and no
-    vulnerability lookup.
+    No authentication is performed.
+    No vulnerability lookup is performed.
 
-    It prepares the evidence consumed by the
-    correlation/SearchSploit engine.
+    The resulting structure is intended for consumption by
+    PivotRaid's vulnerability and correlation layers.
     """
 
     fingerprint = {
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
         # Service
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
 
         "service": {
+
             "name": "ssh",
+
             "port": port,
-            "transport": "tcp"
+
+            "transport": "tcp",
         },
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
         # Target
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
 
         "target": {
-            "host": host
+
+            "host": host,
         },
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
         # Identification
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
 
         "identification": {
+
             "raw_banner": None,
+
             "protocol": None,
+
             "software": None,
+
             "version": None,
+
             "platform": None,
-            "platform_version": None
+
+            "platform_version": None,
         },
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
         # Authentication
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
 
         "authentication": {
+
             "authenticated": False,
+
             "methods": None,
+
             "enumeration_status": (
                 "not_available_without_username"
-            )
+            ),
         },
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
         # Negotiation
-        #
-        # These remain null because this scanner intentionally
-        # does not perform SSH cryptographic negotiation.
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
 
         "negotiation": {
+
             "kex": None,
+
             "cipher": None,
+
             "mac": None,
+
             "host_key": None,
-            "status": "not_performed"
+
+            "status": "not_performed",
         },
 
-        # ----------------------------------------------------
-        # SearchSploit
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
+        # SearchSploit metadata
+        # --------------------------------------------------------------------
 
         "searchsploit": {
+
             "product": None,
+
             "version": None,
+
             "platform": None,
-            "queries": []
-        }
+
+            "queries": [],
+        },
     }
 
-    # ========================================================
+    # ========================================================================
     # Identification
-    # ========================================================
+    # ========================================================================
 
     if server_info:
 
@@ -351,12 +425,12 @@ def collect_ssh_fingerprint(
 
             "platform_version": server_info.get(
                 "platform_version"
-            )
+            ),
         })
 
-    # ========================================================
+    # ========================================================================
     # Authentication
-    # ========================================================
+    # ========================================================================
 
     if authentication:
 
@@ -366,187 +440,310 @@ def collect_ssh_fingerprint(
             authentication
         )
 
-    # ========================================================
-    # SearchSploit Lookup Metadata
-    # ========================================================
+    # ========================================================================
+    # SearchSploit metadata
+    # ========================================================================
 
     product = fingerprint[
         "identification"
-    ]["software"]
+    ][
+        "software"
+    ]
 
     version = fingerprint[
         "identification"
-    ]["version"]
+    ][
+        "version"
+    ]
 
     platform = fingerprint[
         "identification"
-    ]["platform"]
+    ][
+        "platform"
+    ]
 
     fingerprint[
         "searchsploit"
-    ]["product"] = product
+    ][
+        "product"
+    ] = product
 
     fingerprint[
         "searchsploit"
-    ]["version"] = version
+    ][
+        "version"
+    ] = version
 
     fingerprint[
         "searchsploit"
-    ]["platform"] = platform
+    ][
+        "platform"
+    ] = platform
 
     queries = []
 
-    # --------------------------------------------------------
+    # ========================================================================
     # Exact Product + Version
-    # --------------------------------------------------------
+    # ========================================================================
 
     if product and version:
 
         queries.append({
+
             "query": (
                 f"{product} {version}"
             ),
 
-            "confidence": "high",
+            "confidence": "HIGH",
 
             "reason": (
                 "exact product and observed version"
-            )
+            ),
         })
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
         # Normalized Major.Minor
-        # ----------------------------------------------------
+        # --------------------------------------------------------------------
 
         major_minor = re.match(
             r"^(\d+\.\d+)",
-            version
+            version,
         )
 
         if major_minor:
 
             normalized_version = (
-                major_minor.group(1)
+                major_minor.group(
+                    1
+                )
             )
 
-            if normalized_version != version:
+            if (
+                normalized_version
+                != version
+            ):
 
                 queries.append({
+
                     "query": (
                         f"{product} "
                         f"{normalized_version}"
                     ),
 
-                    "confidence": "medium",
+                    "confidence": "MEDIUM",
 
                     "reason": (
                         "normalized product version"
-                    )
+                    ),
                 })
 
-    # --------------------------------------------------------
+    # ========================================================================
     # Product Only
-    # --------------------------------------------------------
+    # ========================================================================
 
     elif product:
 
         queries.append({
+
             "query": product,
 
-            "confidence": "low",
+            "confidence": "LOW",
 
             "reason": (
                 "product identified but "
                 "version unavailable"
-            )
+            ),
         })
 
-    # --------------------------------------------------------
+    # ========================================================================
     # Product + Platform
-    # --------------------------------------------------------
+    # ========================================================================
 
     if product and platform:
 
         queries.append({
+
             "query": (
                 f"{product} {platform}"
             ),
 
-            "confidence": "low",
+            "confidence": "LOW",
 
             "reason": (
                 "product and platform identified"
-            )
+            ),
         })
 
     fingerprint[
         "searchsploit"
-    ]["queries"] = queries
+    ][
+        "queries"
+    ] = queries
 
     return fingerprint
 
 
-# ============================================================
-# 4. JSON PARSER
-# ============================================================
+# ============================================================================
+# 4. FINDING HELPER
+# ============================================================================
 
-def parse_ssh_json(ssh_fingerprint):
+def build_finding(
+    title,
+    severity="INFO",
+    confidence="HIGH",
+    category="general",
+    evidence=None,
+    impact=None,
+):
     """
-    Convert the SSH fingerprint into JSON.
+    Build a normalized PivotRaid finding.
+    """
+
+    valid_severities = {
+
+        "INFO",
+
+        "LOW",
+
+        "MEDIUM",
+
+        "HIGH",
+
+        "CRITICAL",
+    }
+
+    valid_confidence = {
+
+        "LOW",
+
+        "MEDIUM",
+
+        "HIGH",
+    }
+
+    severity = str(
+        severity or "INFO"
+    ).upper()
+
+    confidence = str(
+        confidence or "HIGH"
+    ).upper()
+
+    if severity not in valid_severities:
+
+        severity = "MEDIUM"
+
+    if confidence not in valid_confidence:
+
+        confidence = "MEDIUM"
+
+    return {
+
+        "title": title,
+
+        "severity": severity,
+
+        "confidence": confidence,
+
+        "category": category,
+
+        "evidence": evidence or {},
+
+        "impact": impact,
+    }
+
+
+# ============================================================================
+# 5. JSON SERIALIZATION
+# ============================================================================
+
+def parse_ssh_json(
+    ssh_fingerprint,
+):
+    """
+    Convert an SSH fingerprint into formatted JSON.
     """
 
     return json.dumps(
         ssh_fingerprint,
         indent=4,
-        sort_keys=False
+        sort_keys=False,
     )
 
 
-# ============================================================
-# 5. SSH SCAN
-# ============================================================
+# ============================================================================
+# 6. SSH SCAN
+# ============================================================================
 
 def scan_ssh(
     target,
     port=22,
-    timeout=5
+    timeout=5,
 ):
     """
     Perform unauthenticated SSH fingerprinting.
 
-    The scanner performs only TCP-level SSH banner
-    identification.
+    The scanner performs:
 
-    No username.
-    No password.
-    No authentication.
-    No cryptographic negotiation.
-    No exploit execution.
+        - TCP connection
+        - SSH banner collection
+        - Banner parsing
+        - Structured fingerprint generation
+        - SearchSploit query metadata generation
 
-    The resulting fingerprint is designed for the
-    SearchSploit correlation engine.
+    The scanner does NOT perform:
+
+        - Username enumeration
+        - Password authentication
+        - Brute force
+        - Cryptographic negotiation
+        - Exploit execution
+        - Global risk scoring
+        - Cross-service attack-path generation
+
+    Vulnerability lookup results are intentionally left to the
+    centralized vulnerability-enrichment layer.
     """
 
-    # ========================================================
+    start_time = time.time()
+
+    logger.info(
+        "Beginning SSH assessment on %s:%s",
+        target,
+        port,
+    )
+
+    # ========================================================================
     # Collect SSH Banner
-    # ========================================================
+    # ========================================================================
 
     banner = get_ssh_banner(
         target,
-        port,
-        timeout
+        port=port,
+        timeout=timeout,
     )
 
-    # ========================================================
-    # Port Closed / SSH Not Detected
-    # ========================================================
+    # ========================================================================
+    # SSH Not Detected
+    # ========================================================================
 
     if not banner:
 
+        logger.info(
+            "SSH service not detected on %s:%s",
+            target,
+            port,
+        )
+
         return {
+
             "service": "SSH",
+
             "port": port,
+
             "status": "CLOSED",
+
+            "ssh_fingerprint": None,
 
             "findings": [],
 
@@ -554,108 +751,265 @@ def scan_ssh(
 
             "impact": [],
 
-            "attack_path": [],
-
             "score": 0,
 
             "confidence": 0,
 
             "verdict": "UNKNOWN",
 
-            "scan_time": 0
+            "scan_time": round(
+                time.time()
+                - start_time,
+                2,
+            ),
         }
 
-    # ========================================================
+    # ========================================================================
     # Parse Banner
-    # ========================================================
+    # ========================================================================
 
     server_info = get_ssh_server_info(
         banner
     )
 
-    # ========================================================
+    # ========================================================================
     # Build Fingerprint
-    # ========================================================
+    # ========================================================================
 
     fingerprint = collect_ssh_fingerprint(
         host=target,
         port=port,
-        server_info=server_info
+        server_info=server_info,
     )
-
-    # ========================================================
-    # Findings
-    # ========================================================
 
     findings = []
 
+    impact = []
+
+    # ========================================================================
+    # Banner Finding
+    # ========================================================================
+
     findings.append(
-        "[INFO] SSH Banner: "
-        f"{banner}"
+        build_finding(
+
+            title=(
+                "SSH service banner disclosed"
+            ),
+
+            severity="INFO",
+
+            confidence="HIGH",
+
+            category="fingerprinting",
+
+            evidence={
+                "banner": banner,
+            },
+        )
     )
 
-    if server_info.get(
+    # ========================================================================
+    # Software Finding
+    # ========================================================================
+
+    software = server_info.get(
         "software"
-    ):
+    )
 
-        software = server_info[
-            "software"
-        ]
+    version = server_info.get(
+        "version"
+    )
 
-        version = server_info.get(
-            "version"
-        )
+    if software:
 
         if version:
 
-            findings.append(
-                "[INFO] Fingerprinted: "
+            title = (
+                f"SSH service fingerprinted as "
                 f"{software} {version}"
             )
 
         else:
 
-            findings.append(
-                "[INFO] Fingerprinted: "
+            title = (
+                f"SSH service fingerprinted as "
                 f"{software}"
             )
 
-    if server_info.get(
-        "platform"
-    ):
+        findings.append(
+            build_finding(
 
-        platform = server_info[
-            "platform"
-        ]
+                title=title,
 
-        platform_version = server_info.get(
-            "platform_version"
+                severity="INFO",
+
+                confidence="HIGH",
+
+                category="fingerprinting",
+
+                evidence={
+
+                    "software": software,
+
+                    "version": version,
+                },
+            )
         )
+
+    # ========================================================================
+    # Platform Finding
+    # ========================================================================
+
+    platform = server_info.get(
+        "platform"
+    )
+
+    platform_version = server_info.get(
+        "platform_version"
+    )
+
+    if platform:
 
         if platform_version:
 
-            findings.append(
-                "[INFO] Platform: "
+            title = (
+                f"SSH platform identified as "
                 f"{platform} {platform_version}"
             )
 
         else:
 
-            findings.append(
-                "[INFO] Platform: "
+            title = (
+                f"SSH platform identified as "
                 f"{platform}"
             )
 
-    findings.append(
-        "[INFO] SSH cryptographic negotiation "
-        "not performed; banner fingerprint used."
+        findings.append(
+            build_finding(
+
+                title=title,
+
+                severity="INFO",
+
+                confidence="HIGH",
+
+                category="fingerprinting",
+
+                evidence={
+
+                    "platform": platform,
+
+                    "platform_version": (
+                        platform_version
+                    ),
+                },
+            )
+        )
+
+    # ========================================================================
+    # Protocol Version Observation
+    # ========================================================================
+
+    protocol = server_info.get(
+        "protocol"
     )
 
-    # ========================================================
-    # Return PivotRaid-Compatible Result
-    # ========================================================
+    if protocol:
 
-    return {
+        findings.append(
+            build_finding(
+
+                title=(
+                    f"SSH protocol version identified: "
+                    f"{protocol}"
+                ),
+
+                severity="INFO",
+
+                confidence="HIGH",
+
+                category="fingerprinting",
+
+                evidence={
+                    "protocol": protocol,
+                },
+            )
+        )
+
+    # ========================================================================
+    # Negotiation Status
+    # ========================================================================
+
+    findings.append(
+        build_finding(
+
+            title=(
+                "SSH cryptographic negotiation "
+                "was not performed"
+            ),
+
+            severity="INFO",
+
+            confidence="HIGH",
+
+            category="assessment_scope",
+
+            evidence={
+
+                "negotiation_status": (
+                    "not_performed"
+                ),
+
+                "method": (
+                    "banner_fingerprinting"
+                ),
+            },
+        )
+    )
+
+    # ========================================================================
+    # SearchSploit Query Metadata
+    # ========================================================================
+
+    queries = fingerprint[
+        "searchsploit"
+    ].get(
+        "queries",
+        [],
+    )
+
+    if queries:
+
+        findings.append(
+            build_finding(
+
+                title=(
+                    f"Generated {len(queries)} "
+                    "vulnerability lookup candidate(s)"
+                ),
+
+                severity="INFO",
+
+                confidence="HIGH",
+
+                category="vulnerability_discovery",
+
+                evidence={
+
+                    "queries": queries,
+
+                    "source": "SSH fingerprint",
+                },
+            )
+        )
+
+    # ========================================================================
+    # Result
+    # ========================================================================
+
+    result = {
+
         "service": "SSH",
 
         "port": port,
@@ -666,17 +1020,40 @@ def scan_ssh(
 
         "findings": findings,
 
+        # --------------------------------------------------------------------
+        # Vulnerability candidates are intentionally empty here.
+        #
+        # main.py / the central vulnerability layer can enrich this result
+        # using the fingerprint.
+        # --------------------------------------------------------------------
+
         "vulns": [],
 
-        "impact": [],
+        "impact": impact,
 
-        "attack_path": [],
+        # --------------------------------------------------------------------
+        # Global risk engine owns these values.
+        # --------------------------------------------------------------------
 
         "score": 0,
 
         "confidence": 0,
 
-        "verdict": "INFO",
+        "verdict": "",
 
-        "scan_time": 0
+        "scan_time": round(
+            time.time()
+            - start_time,
+            2,
+        ),
     }
+
+    logger.info(
+        "SSH scan completed on %s in %.2fs",
+        target,
+        result[
+            "scan_time"
+        ],
+    )
+
+    return result
