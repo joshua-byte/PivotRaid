@@ -1,50 +1,162 @@
-import subprocess
 import json
-import shutil
 import logging
+import shutil
+import subprocess
 
 
 logger = logging.getLogger("PivotRaid.Vulns")
 
 
 # ============================================================================
-# Normalize SearchSploit Results
+# Constants
+# ============================================================================
+
+VALID_SEVERITIES = {
+    "INFO",
+    "LOW",
+    "MEDIUM",
+    "HIGH",
+    "CRITICAL",
+}
+
+
+# ============================================================================
+# Exploit Severity Heuristic
+# ============================================================================
+
+def analyze_exploit_severity(title):
+    """
+    Categorize a SearchSploit exploit title into a PivotRaid
+    reporting severity.
+
+    IMPORTANT:
+        This is a title-based heuristic.
+
+        It does NOT establish:
+            - target vulnerability
+            - exploitability
+            - successful exploitation
+            - applicability to the target configuration
+
+    Returns:
+        (severity, heuristic_score)
+    """
+
+    title_lower = (title or "").lower()
+
+    # ------------------------------------------------------------------------
+    # Critical
+    # ------------------------------------------------------------------------
+
+    if any(
+        keyword in title_lower
+        for keyword in [
+            "remote code execution",
+            "remote code exec",
+            "rce",
+            "authentication bypass",
+            "auth bypass",
+            "command execution",
+            "backdoor",
+        ]
+    ):
+        return "CRITICAL", 95
+
+    # ------------------------------------------------------------------------
+    # High
+    # ------------------------------------------------------------------------
+
+    if any(
+        keyword in title_lower
+        for keyword in [
+            "buffer overflow",
+            "privilege escalation",
+            "arbitrary file",
+            "arbitrary command",
+            "arbitrary code",
+            "file upload",
+            "remote exploit",
+        ]
+    ):
+        return "HIGH", 80
+
+    # ------------------------------------------------------------------------
+    # Medium
+    # ------------------------------------------------------------------------
+
+    if any(
+        keyword in title_lower
+        for keyword in [
+            "information disclosure",
+            "information leak",
+            "directory traversal",
+            "path traversal",
+            "traversal",
+            "denial of service",
+            "denial-of-service",
+            "dos",
+        ]
+    ):
+        return "MEDIUM", 50
+
+    # ------------------------------------------------------------------------
+    # Low
+    # ------------------------------------------------------------------------
+
+    return "LOW", 25
+
+
+# ============================================================================
+# Normalize SearchSploit Result
 # ============================================================================
 
 def normalize_exploit_result(
     exploit,
     product,
-    version,
-    platform
+    version="",
+    platform="",
+    service="",
+    query="",
+    query_confidence="medium",
 ):
     """
-    Convert a raw SearchSploit JSON result into the
-    normalized PivotRaid vulnerability structure.
+    Convert a raw SearchSploit result into the canonical
+    PivotRaid vulnerability-candidate structure.
 
-    This function does not determine exploitability.
-    It only normalizes SearchSploit output.
+    This function performs normalization only.
+
+    It does NOT determine whether the target is vulnerable.
     """
 
-    title = exploit.get(
-        "Title",
-        ""
-    )
+    if not isinstance(exploit, dict):
+        return None
 
-    path = exploit.get(
-        "Path",
-        ""
-    )
+    title = str(
+        exploit.get("Title", "")
+    ).strip()
+
+    path = str(
+        exploit.get("Path", "")
+    ).strip()
 
     edb_id = str(
-        exploit.get(
-            "EDB-ID",
-            ""
-        )
+        exploit.get("EDB-ID", "")
+    ).strip()
+
+    if not title:
+        title = "Unnamed SearchSploit result"
+
+    severity, heuristic_score = (
+        analyze_exploit_severity(title)
     )
 
-    severity, score = analyze_exploit_severity(
-        title
-    )
+    url = None
+
+    if edb_id:
+        url = (
+            "https://www.exploit-db.com/"
+            f"exploits/{edb_id}"
+        )
 
     return {
         "id": edb_id,
@@ -55,19 +167,158 @@ def normalize_exploit_result(
 
         "severity": severity,
 
-        "score": score,
+        # This is a heuristic reporting value.
+        # It is NOT a CVSS score and NOT exploitability.
+        "heuristic_score": heuristic_score,
 
-        "url": (
-            "https://www.exploit-db.com/"
-            f"exploits/{edb_id}"
+        "url": url,
+
+        # Explicitly identify this as a candidate.
+        "status": "CANDIDATE",
+
+        "confirmed": False,
+
+        "exploitability": "UNKNOWN",
+
+        "confidence": (
+            str(query_confidence or "medium").upper()
         ),
 
+        "source": "Exploit-DB/SearchSploit",
+
         "lookup": {
-            "product": product,
-            "version": version,
-            "platform": platform
-        }
+            "product": product or "",
+            "version": version or "",
+            "platform": platform or "",
+            "service": service or "",
+            "query": query or "",
+        },
+
+        # Preserve the original result for reporting/debugging.
+        "raw": exploit,
     }
+
+
+# ============================================================================
+# SearchSploit Binary
+# ============================================================================
+
+def searchsploit_available():
+    """
+    Return True when SearchSploit is available in PATH.
+    """
+
+    return shutil.which("searchsploit") is not None
+
+
+# ============================================================================
+# Execute SearchSploit
+# ============================================================================
+
+def _run_searchsploit(search_term, timeout=5):
+    """
+    Execute SearchSploit and return its decoded JSON object.
+
+    This function performs no interpretation of vulnerabilities.
+    """
+
+    if not search_term:
+        return None
+
+    try:
+        process = subprocess.run(
+            [
+                "searchsploit",
+                "--json",
+                search_term,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "SearchSploit query timed out: %s",
+            search_term,
+        )
+        return None
+
+    except OSError as exc:
+        logger.warning(
+            "SearchSploit execution failed: %s",
+            exc,
+        )
+        return None
+
+    if process.returncode != 0:
+        logger.debug(
+            "SearchSploit returned exit code %s for '%s': %s",
+            process.returncode,
+            search_term,
+            process.stderr.strip(),
+        )
+
+    if not process.stdout.strip():
+        logger.debug(
+            "SearchSploit returned no output for: %s",
+            search_term,
+        )
+        return None
+
+    try:
+        return json.loads(
+            process.stdout
+        )
+
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Invalid SearchSploit JSON for '%s': %s",
+            search_term,
+            exc,
+        )
+        return None
+
+
+# ============================================================================
+# Deduplicate Results
+# ============================================================================
+
+def _deduplicate_vulnerabilities(vulnerabilities):
+    """
+    Remove duplicate vulnerability candidates.
+
+    EDB-ID is preferred as the stable identifier.
+    If unavailable, title/path are used.
+    """
+
+    unique = []
+    seen = set()
+
+    for vulnerability in vulnerabilities:
+        edb_id = vulnerability.get("id")
+
+        if edb_id:
+            key = (
+                "edb",
+                edb_id,
+            )
+        else:
+            key = (
+                "fallback",
+                vulnerability.get("title", "").lower(),
+                vulnerability.get("path", "").lower(),
+            )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique.append(vulnerability)
+
+    return unique
 
 
 # ============================================================================
@@ -78,59 +329,55 @@ def query_searchsploit(
     product,
     version="",
     platform="",
-    service=""
+    service="",
+    query_confidence="high",
+    timeout=5,
 ):
     """
-    Query the local SearchSploit database using structured
-    service evidence.
+    Query the local SearchSploit database.
 
-    SearchSploit is the sole vulnerability intelligence
-    source used by PivotRaid.
+    SearchSploit results are returned as vulnerability CANDIDATES.
 
-    This function performs lookup only. It does not
-    establish exploitability.
+    The function does NOT establish:
+        - that the target is vulnerable
+        - that the exploit applies
+        - that exploitation is possible
+        - that exploitation succeeded
     """
 
     product_clean = (
         product or ""
-    ).lower().strip()
+    ).strip()
 
     version_clean = (
         version or ""
-    ).lower().strip()
+    ).strip()
 
     platform_clean = (
         platform or ""
-    ).lower().strip()
+    ).strip()
 
     service_clean = (
         service or ""
-    ).lower().strip()
+    ).strip()
 
     if not product_clean:
-
         logger.debug(
             "SearchSploit lookup skipped: "
-            "product was not identified."
+            "product not identified."
         )
-
         return []
 
-    if not shutil.which("searchsploit"):
-
+    if not searchsploit_available():
         logger.warning(
-            "SearchSploit binary not found "
-            "in system PATH."
+            "SearchSploit binary not found in PATH."
         )
-
         return []
 
     # ------------------------------------------------------------------------
-    # Product + version
+    # Construct lookup term.
     #
-    # Platform and service are retained as contextual
-    # metadata rather than automatically added to the
-    # SearchSploit query.
+    # Platform and service remain contextual metadata.
     # ------------------------------------------------------------------------
 
     search_terms = [
@@ -138,7 +385,6 @@ def query_searchsploit(
     ]
 
     if version_clean:
-
         search_terms.append(
             version_clean
         )
@@ -148,115 +394,67 @@ def query_searchsploit(
     )
 
     logger.info(
-        "SearchSploit lookup: "
-        f"{search_term}"
+        "SearchSploit lookup: %s",
+        search_term,
     )
 
-    try:
+    data = _run_searchsploit(
+        search_term,
+        timeout=timeout,
+    )
 
-        process = subprocess.run(
-            [
-                "searchsploit",
-                "--json",
-                search_term
-            ],
+    if not data:
+        return []
 
-            stdout=subprocess.PIPE,
+    results = data.get(
+        "RESULTS_EXPLOIT",
+        [],
+    )
 
-            stderr=subprocess.PIPE,
+    if not isinstance(results, list):
+        logger.debug(
+            "Unexpected SearchSploit result structure "
+            "for: %s",
+            search_term,
+        )
+        return []
 
-            text=True,
+    logger.debug(
+        "SearchSploit returned %d raw result(s) for %s",
+        len(results),
+        search_term,
+    )
 
-            timeout=5
+    vulnerabilities = []
+
+    for exploit in results:
+        normalized = normalize_exploit_result(
+            exploit=exploit,
+            product=product_clean,
+            version=version_clean,
+            platform=platform_clean,
+            service=service_clean,
+            query=search_term,
+            query_confidence=query_confidence,
         )
 
-        if not process.stdout.strip():
-
-            logger.debug(
-                "SearchSploit returned no output "
-                f"for: {search_term}"
+        if normalized:
+            vulnerabilities.append(
+                normalized
             )
 
-            return []
+    vulnerabilities = _deduplicate_vulnerabilities(
+        vulnerabilities
+    )
 
-        data = json.loads(
-            process.stdout
-        )
+    logger.info(
+        "SearchSploit produced %d vulnerability "
+        "candidate(s) for %s",
+        len(vulnerabilities),
+        search_term,
+    )
 
-        results = data.get(
-            "RESULTS_EXPLOIT",
-            []
-        )
-
-        logger.debug(
-            "SearchSploit returned "
-            f"{len(results)} raw result(s) "
-            f"for: {search_term}"
-        )
-
-        filtered_vulns = []
-
-        for exploit in results:
-
-            normalized = normalize_exploit_result(
-                exploit=exploit,
-                product=product,
-                version=version,
-                platform=platform
-            )
-
-            if normalized["severity"] in [
-                "HIGH",
-                "CRITICAL"
-            ]:
-
-                filtered_vulns.append(
-                    normalized
-                )
-
-        logger.info(
-            "SearchSploit produced "
-            f"{len(filtered_vulns)} HIGH/CRITICAL "
-            f"candidate(s) for {search_term}"
-        )
-
-        return filtered_vulns
-
-    except subprocess.TimeoutExpired:
-
-        logger.warning(
-            "SearchSploit query timed out "
-            f"for term: {search_term}"
-        )
-
-        return []
-
-    except json.JSONDecodeError as error:
-
-        logger.warning(
-            "SearchSploit returned invalid JSON "
-            f"for {search_term}: {error}"
-        )
-
-        return []
-
-    except OSError as error:
-
-        logger.warning(
-            "SearchSploit execution failed: "
-            f"{error}"
-        )
-
-        return []
-
-    except Exception as error:
-
-        logger.debug(
-            "Unexpected SearchSploit error: "
-            f"{error}"
-        )
-
-        return []
+    return vulnerabilities
 
 
 # ============================================================================
@@ -264,10 +462,11 @@ def query_searchsploit(
 # ============================================================================
 
 def query_from_fingerprint(
-    fingerprint
+    fingerprint,
+    timeout=5,
 ):
     """
-    Query SearchSploit directly from a structured
+    Query SearchSploit from a canonical PivotRaid
     service fingerprint.
 
     Expected structure:
@@ -279,7 +478,7 @@ def query_from_fingerprint(
 
             "identification": {
                 "software": "OpenSSH",
-                "version": "4.7p1",
+                "version": "8.9p1",
                 "platform": "Ubuntu"
             }
         }
@@ -290,120 +489,131 @@ def query_from_fingerprint(
 
     service_info = fingerprint.get(
         "service",
-        {}
-    )
-
-    service = service_info.get(
-        "name",
-        ""
+        {},
     )
 
     identification = fingerprint.get(
         "identification",
-        {}
+        {},
+    )
+
+    service = service_info.get(
+        "name",
+        "",
     )
 
     product = identification.get(
-        "software"
+        "software",
     )
 
     version = identification.get(
-        "version"
+        "version",
     )
 
     platform = identification.get(
-        "platform"
+        "platform",
     )
 
     if not product:
-
         logger.debug(
             "Fingerprint does not contain "
             "an identifiable product."
         )
-
         return []
 
     return query_searchsploit(
         product=product,
         version=version or "",
         platform=platform or "",
-        service=service
+        service=service,
+        query_confidence="high" if version else "low",
+        timeout=timeout,
     )
 
 
 # ============================================================================
-# Exploit Severity Heuristic
+# Batch Fingerprint Lookup
 # ============================================================================
 
-def analyze_exploit_severity(
-    title
+def query_multiple_fingerprints(
+    fingerprints,
+    timeout=5,
 ):
     """
-    Categorize SearchSploit exploit titles into
-    PivotRaid threat classes.
+    Run SearchSploit against multiple structured fingerprints.
 
-    This is a reporting heuristic.
-
-    It is NOT a determination that the target is
-    actually vulnerable or exploitable.
+    Duplicate vulnerability candidates are removed.
     """
 
-    title_lower = (
-        title or ""
-    ).lower()
+    if not fingerprints:
+        return []
 
-    # ------------------------------------------------------------------------
-    # Critical
-    # ------------------------------------------------------------------------
+    all_vulnerabilities = []
 
-    if any(
-        keyword in title_lower
-        for keyword in [
-            "rce",
-            "remote code execution",
-            "auth bypass",
-            "authentication bypass",
-            "backdoor"
-        ]
-    ):
+    for fingerprint in fingerprints:
+        results = query_from_fingerprint(
+            fingerprint,
+            timeout=timeout,
+        )
 
-        return "CRITICAL", 95
+        all_vulnerabilities.extend(
+            results
+        )
 
-    # ------------------------------------------------------------------------
-    # High
-    # ------------------------------------------------------------------------
+    return _deduplicate_vulnerabilities(
+        all_vulnerabilities
+    )
 
-    elif any(
-        keyword in title_lower
-        for keyword in [
-            "buffer overflow",
-            "privilege escalation",
-            "arbitrary file",
-            "upload"
-        ]
-    ):
 
-        return "HIGH", 80
+# ============================================================================
+# Vulnerability Summary
+# ============================================================================
 
-    # ------------------------------------------------------------------------
-    # Medium
-    # ------------------------------------------------------------------------
+def summarize_vulnerabilities(
+    vulnerabilities
+):
+    """
+    Produce a compact summary of vulnerability candidates.
 
-    elif any(
-        keyword in title_lower
-        for keyword in [
-            "disclosure",
-            "traversal",
-            "dos",
-            "denial of service"
-        ]
-    ):
+    This summary is intended for reporting and risk-engine input.
+    """
 
-        return "MEDIUM", 50
+    summary = {
+        "total": 0,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "confirmed": 0,
+        "candidates": 0,
+    }
 
-    # ------------------------------------------------------------------------
-    # Low
-    # ------------------------------------------------------------------------
+    for vulnerability in vulnerabilities or []:
+        summary["total"] += 1
 
-    return "LOW", 25
+        severity = str(
+            vulnerability.get(
+                "severity",
+                "LOW",
+            )
+        ).upper()
+
+        if severity == "CRITICAL":
+            summary["critical"] += 1
+
+        elif severity == "HIGH":
+            summary["high"] += 1
+
+        elif severity == "MEDIUM":
+            summary["medium"] += 1
+
+        else:
+            summary["low"] += 1
+
+        if vulnerability.get("confirmed"):
+            summary["confirmed"] += 1
+
+        else:
+            summary["candidates"] += 1
+
+    return summary
