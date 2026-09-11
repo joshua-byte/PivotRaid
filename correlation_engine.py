@@ -51,9 +51,13 @@ class CorrelationEngine:
     def __init__(self):
 
         self.services = {}
-
         self.relationships = []
+        self.attack_paths = []
 
+    def _reset(self):
+        """Reset correlation state before a new assessment."""
+        self.services = {}
+        self.relationships = []
         self.attack_paths = []
 
     # ========================================================================
@@ -385,6 +389,19 @@ class CorrelationEngine:
                 evidence or []
             ),
         }
+
+        for existing in self.attack_paths:
+
+            if str(
+                existing.get(
+                    "name",
+                    ""
+                )
+            ).strip().lower() == str(
+                name
+            ).strip().lower():
+
+                return existing
 
         self.attack_paths.append(
             path
@@ -1071,9 +1088,12 @@ class CorrelationEngine:
         if not ssh:
             return
 
-        if ssh.get(
-            "status"
-        ) != "OPEN":
+        if str(
+            ssh.get(
+                "status",
+                ""
+            )
+        ).upper() != "OPEN":
             return
 
         credential_services = []
@@ -1369,6 +1389,12 @@ class CorrelationEngine:
         """
 
         for service, result in self.services.items():
+
+            if not isinstance(
+                result,
+                dict,
+            ):
+                continue
 
             vulnerabilities = result.get(
                 "vulns",
@@ -1685,11 +1711,7 @@ class CorrelationEngine:
         Run the complete cross-service correlation process.
         """
 
-        self.services = {}
-
-        self.relationships = []
-
-        self.attack_paths = []
+        self._reset()
 
         self.index_services(
             service_results
