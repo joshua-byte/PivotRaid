@@ -498,8 +498,3 @@ Operating this tool against systems without explicit authorization may be illega
 
 ---
 
-# Author
-
-Joshua Jesuraj Sanctus
-
-Cybersecurity • Detection Engineering • VAPT • Offensive Security Automation
