@@ -68,7 +68,7 @@ class FTPScanner:
 
             "port": port,
 
-            "status": "CLOSED",
+            "status": "UNKNOWN",
 
             # ----------------------------------------------------------------
             # Structured findings
@@ -505,6 +505,15 @@ class FTPScanner:
                 self.target,
                 self.port,
                 exc,
+            )
+
+            # A failed connection is not proof that the port is closed.
+            # Preserve timeouts as inconclusive; classify other socket/
+            # protocol failures as UNKNOWN unless a probe proves otherwise.
+            self.result["status"] = (
+                "TIMEOUT"
+                if isinstance(exc, (TimeoutError,)) or "timed out" in str(exc).lower()
+                else "UNKNOWN"
             )
 
             self.add_finding(
