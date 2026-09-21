@@ -396,6 +396,13 @@ def generate_html_report(results, target, filename="report.html"):
     </style>
 </head>
 <body>
+    <div class="card" role="note">
+        <strong>Assessment limitation:</strong>
+        Port states reflect the evidence available to this scan.
+        TIMEOUT or UNKNOWN does not prove a port is closed; FILTERED
+        should be reported only when supported by an explicit probe result.
+        No findings does not guarantee that the target is secure.
+    </div>
 
 <div class="container">
 
