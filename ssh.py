@@ -730,7 +730,7 @@ def scan_ssh(
     if not banner:
 
         logger.info(
-            "SSH service not detected on %s:%s",
+            "SSH service banner not obtained on %s:%s (state inconclusive)",
             target,
             port,
         )
@@ -741,7 +741,7 @@ def scan_ssh(
 
             "port": port,
 
-            "status": "CLOSED",
+            "status": "UNKNOWN",
 
             "ssh_fingerprint": None,
 
