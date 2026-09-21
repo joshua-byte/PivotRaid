@@ -88,7 +88,7 @@ class SMBScanner:
 
             "port": 445,
 
-            "status": "CLOSED",
+            "status": "UNKNOWN",
 
             # ----------------------------------------------------------------
             # Structured findings
@@ -293,6 +293,14 @@ class SMBScanner:
                 "SMB connection failed to %s:445 - %s",
                 self.target,
                 exc,
+            )
+
+            # A timeout is inconclusive; it does not establish CLOSED or
+            # FILTERED without an explicit network-level probe result.
+            self.result["status"] = (
+                "TIMEOUT"
+                if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower()
+                else "UNKNOWN"
             )
 
             self.add_finding(
