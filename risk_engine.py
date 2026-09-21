@@ -866,8 +866,9 @@ class RiskEngine:
                 "has been identified."
             ),
             "INFO": (
-                "INFO – No significant security "
-                "exposure was identified."
+                "INFO – No significant exposure was identified "
+                "within the observed scan results; this is not "
+                "a guarantee that the target is secure."
             ),
         }
 
